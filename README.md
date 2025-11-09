@@ -2,11 +2,6 @@
 
 An intelligent assistant that automates end-to-end cybersecurity plan creation by embedding leading frameworks (NIST CSF, ISO 27001, NIST AI RMF, MITRE ATLAS) using LangChain and LangGraph.
 
-## Team: CodeRise
-- Frances Marie Limlengco (180927238)
-- Side Mi (169281235)
-- Tuan Duong Huynh (102318243)
-- Dinh Khoa Chau (174120238)
 
 ## Architecture
 
