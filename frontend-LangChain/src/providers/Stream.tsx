@@ -377,12 +377,6 @@ const StreamSession = ({
         
         // Skip if we've already processed this ID in this batch
         if (seenCanonicalIds.has(effectiveId)) {
-          console.log(
-            `[SSE] Skipping duplicate message in incoming batch: ${effectiveId.substring(
-              0,
-              8,
-            )}...`,
-          );
           return;
         }
         
@@ -450,41 +444,6 @@ const StreamSession = ({
         }
       });
 
-      // Debug: Log message order
-      console.log('[SSE-ORDER] === Message Order Debug ===');
-      console.log('[SSE-ORDER] Incoming from backend:', incomingMessages.length, 'messages');
-      incomingMessages.forEach((msg, idx) => {
-        const msgId = getCanonicalId(msg) ?? msg?.id;
-        const contentPreview = typeof msg.content === 'string' 
-          ? msg.content.substring(0, 50) 
-          : Array.isArray(msg.content) 
-            ? JSON.stringify(msg.content).substring(0, 50)
-            : '';
-        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
-      });
-      
-      console.log('[SSE-ORDER] Processed messages:', processedMessages.length);
-      processedMessages.forEach((msg, idx) => {
-        const msgId = getCanonicalId(msg) ?? msg?.id;
-        const contentPreview = typeof msg.content === 'string' 
-          ? msg.content.substring(0, 50) 
-          : Array.isArray(msg.content) 
-            ? JSON.stringify(msg.content).substring(0, 50)
-            : '';
-        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
-      });
-      
-      console.log('[SSE-ORDER] Preserved historical:', preservedHistorical.length);
-      preservedHistorical.forEach((msg, idx) => {
-        const msgId = getCanonicalId(msg) ?? msg?.id;
-        const contentPreview = typeof msg.content === 'string' 
-          ? msg.content.substring(0, 50) 
-          : Array.isArray(msg.content) 
-            ? JSON.stringify(msg.content).substring(0, 50)
-            : '';
-        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
-      });
-
       // CRITICAL: Maintain chronological order
       // Backend may only send current round's messages, not full history
       // So we need to merge: [historical messages] + [new messages from backend] + [optimistic]
@@ -493,17 +452,6 @@ const StreamSession = ({
         ...processedMessages,
         ...preservedOptimistic,
       ]);
-      
-      console.log('[SSE-ORDER] Final combined:', combined.length);
-      combined.forEach((msg, idx) => {
-        const msgId = getCanonicalId(msg) ?? msg?.id;
-        const contentPreview = typeof msg.content === 'string' 
-          ? msg.content.substring(0, 50) 
-          : Array.isArray(msg.content) 
-            ? JSON.stringify(msg.content).substring(0, 50)
-            : '';
-        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
-      });
       
       if (messagesAreEqual(combined, directSSEMessagesRef.current)) {
         return;

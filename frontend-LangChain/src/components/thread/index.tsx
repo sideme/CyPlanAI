@@ -144,21 +144,6 @@ export function Thread() {
       );
     };
 
-    const sourceIds = sourceMessages.map((msg) => resolveId(msg) || "(no-id)");
-    console.log("[DEDUPE] Source message IDs:", sourceIds.join(", "));
-    
-    // Log detailed message info
-    console.log("[DEDUPE] === Detailed Message Info ===");
-    sourceMessages.forEach((msg, idx) => {
-      const msgId = resolveId(msg);
-      const contentPreview = typeof msg.content === 'string' 
-        ? msg.content.substring(0, 50) 
-        : Array.isArray(msg.content) 
-          ? JSON.stringify(msg.content).substring(0, 50)
-          : '';
-      console.log(`[DEDUPE]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
-    });
-
     // Since Stream.tsx now handles deduplication properly, we can simplify here
     // Just remove any exact duplicates that might have slipped through
     const seenIds = new Set<string>();
@@ -172,7 +157,6 @@ export function Thread() {
       if (msgId) {
         if (seenIds.has(msgId)) {
           // Skip duplicate
-          console.log(`[DEDUPE] Skipping duplicate message with id=${msgId.substring(0, 8)}...`);
           return;
         }
         seenIds.add(msgId);
@@ -181,11 +165,6 @@ export function Thread() {
       result.push(message);
     });
 
-    const finalIds = result.map((msg) => resolveId(msg) || "(no-id)");
-    console.log(
-      `[DEDUPE] Final message count: ${result.length} (from ${sourceMessages.length} source messages) | final IDs: ${finalIds.join(", ")}`
-    );
-    
     // Only use stream.messages if both directSSE and values.messages are empty
     if (result.length === 0 && messagesFromStream.length > 0) {
       return messagesFromStream as StreamMessage[];
