@@ -20,7 +20,12 @@ class Config:
     DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
     DEEPSEEK_API_BASE = os.environ.get('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
     DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')
-    LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai')  # openai|anthropic|ollama|deepseek
+    # Qwen configuration
+    DASHSCOPE_API_KEY = os.environ.get('DASHSCOPE_API_KEY')
+    DASHSCOPE_BASE_URL = os.environ.get('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    QWEN_MODEL = os.environ.get('QWEN_MODEL', 'qwen-long')
+    
+    LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai')  # openai|anthropic|ollama|deepseek|qwen
     CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(',')
     # Vector database configuration
     VECTOR_DB_PATH = os.environ.get('VECTOR_DB_PATH', './vector_db')

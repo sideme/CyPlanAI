@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode, useEffect, useRef, useMemo } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext, useDirectSSEMessages } from "@/providers/Stream";
@@ -12,6 +12,7 @@ import {
   DO_NOT_RENDER_ID_PREFIX,
   ensureToolCallsHaveResponses,
 } from "@/lib/ensure-tool-responses";
+import type { Message } from "@langchain/langgraph-sdk";
 import { LangGraphLogoSVG } from "../icons/langgraph";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import {
@@ -28,8 +29,6 @@ import ThreadHistory from "./history";
 import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Label } from "../ui/label";
-import { Switch } from "../ui/switch";
-import { GitHubSVG } from "../icons/github";
 import {
   Tooltip,
   TooltipContent,
@@ -87,30 +86,6 @@ function ScrollToBottom(props: { className?: string }) {
   );
 }
 
-function OpenGitHubRepo() {
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <a
-            href="https://github.com/langchain-ai/agent-chat-ui"
-            target="_blank"
-            className="flex items-center justify-center"
-          >
-            <GitHubSVG
-              width="24"
-              height="24"
-            />
-          </a>
-        </TooltipTrigger>
-        <TooltipContent side="left">
-          <p>Open GitHub repo</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
 export function Thread() {
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
@@ -152,55 +127,72 @@ export function Thread() {
     ? (stream.messages as StreamMessage[])
     : [];
   
-  // CRITICAL: Prioritize directSSE.messages (manually intercepted from SSE)
-  // This bypasses SDK's stream.values update mechanism
-  let finalMessages: StreamMessage[] = messagesFromDirectSSE.length > 0 
-    ? messagesFromDirectSSE 
-    : messagesFromValues;
+  // CRITICAL: Deduplicate messages - wrapped in useMemo to avoid repeated execution
+  const finalMessages: StreamMessage[] = useMemo(() => {
+    // Prioritize directSSE.messages (manually intercepted from SSE)
+    const sourceMessages = messagesFromDirectSSE.length > 0 
+      ? messagesFromDirectSSE 
+      : messagesFromValues;
 
-  const dedupedMessages: StreamMessage[] = [];
-  const getContentSignature = (message: StreamMessage): string => {
-    if (Array.isArray(message.content)) {
-      return JSON.stringify(message.content);
+    const resolveId = (message: StreamMessage): string | undefined => {
+      if (!message) return undefined;
+      return (
+        message.id ||
+        (message as any).client_message_id ||
+        (message.additional_kwargs as any)?.client_message_id ||
+        (message.additional_kwargs as any)?.id
+      );
+    };
+
+    const sourceIds = sourceMessages.map((msg) => resolveId(msg) || "(no-id)");
+    console.log("[DEDUPE] Source message IDs:", sourceIds.join(", "));
+    
+    // Log detailed message info
+    console.log("[DEDUPE] === Detailed Message Info ===");
+    sourceMessages.forEach((msg, idx) => {
+      const msgId = resolveId(msg);
+      const contentPreview = typeof msg.content === 'string' 
+        ? msg.content.substring(0, 50) 
+        : Array.isArray(msg.content) 
+          ? JSON.stringify(msg.content).substring(0, 50)
+          : '';
+      console.log(`[DEDUPE]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
+    });
+
+    // Since Stream.tsx now handles deduplication properly, we can simplify here
+    // Just remove any exact duplicates that might have slipped through
+    const seenIds = new Set<string>();
+    const result: StreamMessage[] = [];
+
+    sourceMessages.forEach((message) => {
+      if (!message) return;
+      
+      const msgId = resolveId(message);
+      
+      if (msgId) {
+        if (seenIds.has(msgId)) {
+          // Skip duplicate
+          console.log(`[DEDUPE] Skipping duplicate message with id=${msgId.substring(0, 8)}...`);
+          return;
+        }
+        seenIds.add(msgId);
+      }
+      
+      result.push(message);
+    });
+
+    const finalIds = result.map((msg) => resolveId(msg) || "(no-id)");
+    console.log(
+      `[DEDUPE] Final message count: ${result.length} (from ${sourceMessages.length} source messages) | final IDs: ${finalIds.join(", ")}`
+    );
+    
+    // Only use stream.messages if both directSSE and values.messages are empty
+    if (result.length === 0 && messagesFromStream.length > 0) {
+      return messagesFromStream as StreamMessage[];
     }
-    if (typeof message.content === "string") {
-      return message.content;
-    }
-    return JSON.stringify(message.content ?? "");
-  };
-
-  finalMessages.forEach((message) => {
-    const signature = getContentSignature(message);
-    const latest = dedupedMessages[dedupedMessages.length - 1];
-
-    if (
-      latest &&
-      latest.type === message.type &&
-      getContentSignature(latest) === signature &&
-      Boolean(latest.clientOptimistic) !== Boolean(message.clientOptimistic)
-    ) {
-      dedupedMessages[dedupedMessages.length - 1] = {
-        ...latest,
-        ...message,
-        clientOptimistic: false,
-      };
-      return;
-    }
-
-    if (latest && latest.type === message.type && getContentSignature(latest) === signature) {
-      // Skip exact duplicates (e.g., when backend replays the same message without optimistic context)
-      return;
-    }
-
-    dedupedMessages.push({ ...message });
-  });
-
-  finalMessages = dedupedMessages;
-
-  // Only use stream.messages if both directSSE and values.messages are empty
-  if (finalMessages.length === 0 && messagesFromStream.length > 0) {
-    finalMessages = messagesFromStream;
-  }
+    
+    return result;
+  }, [messagesFromDirectSSE, messagesFromValues, messagesFromStream]);
   
   // Debug: Log which source we're using
   // Log both sources for debugging (only when messages change)
@@ -321,7 +313,9 @@ export function Thread() {
       ] as StreamMessage["content"],
     };
 
-    const toolMessages = ensureToolCallsHaveResponses(finalMessages);
+    const toolMessages = ensureToolCallsHaveResponses(
+      finalMessages as unknown as Message[],
+    ) as unknown as StreamMessage[];
 
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
@@ -329,7 +323,10 @@ export function Thread() {
     directSSE.addOptimisticMessage({ ...newHumanMessage, clientOptimistic: true });
 
     stream.submit(
-      { messages: [...toolMessages, newHumanMessage], context },
+      {
+        messages: [...toolMessages, newHumanMessage] as unknown as Message[],
+        context,
+      },
       {
         streamMode: ["values", "updates"],
         streamSubgraphs: true,
@@ -337,7 +334,11 @@ export function Thread() {
         optimisticValues: (prev: Record<string, any>) => ({
           ...prev,
           context,
-          messages: [...(prev.messages ?? []), ...toolMessages, newHumanMessage],
+          messages: [
+            ...(prev.messages ?? []),
+            ...toolMessages,
+            newHumanMessage,
+          ],
         }),
       },
     );
@@ -353,7 +354,7 @@ export function Thread() {
     prevMessageLength.current = prevMessageLength.current - 1;
     setFirstTokenReceived(false);
     stream.submit(undefined, {
-      checkpoint: parentCheckpoint,
+      checkpoint: parentCheckpoint as any,
       streamMode: ["values"],
       streamSubgraphs: true,
       streamResumable: true,
@@ -435,9 +436,6 @@ export function Thread() {
                   </Button>
                 )}
               </div>
-              <div className="absolute top-2 right-4 flex items-center">
-                <OpenGitHubRepo />
-              </div>
             </div>
           )}
           {chatStarted && (
@@ -475,15 +473,12 @@ export function Thread() {
                     height={32}
                   />
                   <span className="text-xl font-semibold tracking-tight">
-                    Agent Chat
+                    CyPlanAI
                   </span>
                 </motion.button>
               </div>
 
               <div className="flex items-center gap-4">
-                <div className="flex items-center">
-                  <OpenGitHubRepo />
-                </div>
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
@@ -522,8 +517,9 @@ export function Thread() {
                         const filteredMessages = finalMessages.filter((m) => {
                           return !m.id?.startsWith(DO_NOT_RENDER_ID_PREFIX);
                         });
-                        
-                        return filteredMessages.map((message, index) =>
+                        const typedMessages = filteredMessages as unknown as Message[];
+
+                        return typedMessages.map((message, index) =>
                           message.type === "human" ? (
                             <HumanMessage
                               key={message.id || `human-${index}`}
@@ -567,7 +563,7 @@ export function Thread() {
                     <div className="flex items-center gap-3">
                       <LangGraphLogoSVG className="h-8 flex-shrink-0" />
                       <h1 className="text-2xl font-semibold tracking-tight">
-                        Agent Chat
+                        CyPlanAI
                       </h1>
                     </div>
                   )}
@@ -613,21 +609,6 @@ export function Thread() {
                       />
 
                       <div className="flex items-center gap-6 p-2 pt-4">
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <Switch
-                              id="render-tool-calls"
-                              checked={hideToolCalls ?? false}
-                              onCheckedChange={setHideToolCalls}
-                            />
-                            <Label
-                              htmlFor="render-tool-calls"
-                              className="text-sm text-gray-600"
-                            >
-                              Hide Tool Calls
-                            </Label>
-                          </div>
-                        </div>
                         <Label
                           htmlFor="file-input"
                           className="flex cursor-pointer items-center gap-2"

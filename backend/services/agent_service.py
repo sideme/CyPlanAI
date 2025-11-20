@@ -40,6 +40,13 @@ class AgentService:
             return ChatAnthropic(api_key=Config.ANTHROPIC_API_KEY, model=Config.ANTHROPIC_MODEL, temperature=0.4)
         if provider == 'ollama':
             return ChatOllama(base_url=Config.OLLAMA_BASE_URL, model=Config.OLLAMA_MODEL, temperature=0.4)
+        if provider == 'qwen' and Config.DASHSCOPE_API_KEY:
+            return ChatOpenAI(
+                api_key=Config.DASHSCOPE_API_KEY,
+                base_url=Config.DASHSCOPE_BASE_URL,
+                model=Config.QWEN_MODEL,
+                temperature=0.4,
+            )
         return None
 
     def _chat_response(self, session_id: str, user_text: str) -> str:

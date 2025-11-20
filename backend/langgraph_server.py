@@ -6,6 +6,8 @@ import os
 import json
 import logging
 import hashlib
+import io
+import base64
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -19,6 +21,7 @@ from pydantic import BaseModel
 from app import create_app as create_flask_app
 from models import db, AgentSession, AgentMessage, ChatThread, ChatMessage
 from langgraph_agent import create_agent_graph, AgentState
+from services.qwen_service import QwenFileService
 from config import Config
 
 # Configure logging
@@ -219,25 +222,99 @@ async def create_run(thread_id: str, request: MessageRequest):
             # Format: {"role": "user", "content": "..."} or {"type": "human", "content": [...]}
             msg_type = msg.get("type") or msg.get("role", "")
             content = msg.get("content", "")
-            
+
+            metadata = {}
+            if msg.get("id"):
+                metadata["client_message_id"] = str(msg.get("id"))
+            uploaded_file_ids: list[str] = []
+
             # Handle content array format from LangGraph SDK
             if isinstance(content, list):
-                # Extract text from content array
-                text_parts = []
+                processed_content = []
                 for item in content:
-                    if isinstance(item, dict):
-                        if item.get("type") == "text":
-                            text_parts.append(item.get("text", ""))
-                content = " ".join(text_parts) if text_parts else ""
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    item_type = item.get("type")
+                    
+                    if item_type == "text":
+                        processed_content.append({
+                            "type": "text", 
+                            "text": item.get("text", "")
+                        })
+                    elif item_type == "image":
+                        # Convert frontend image to LangChain image_url
+                        # This allows multimodal models to see the image
+                        mime = item.get("mime_type", "image/jpeg")
+                        data = item.get("data", "")
+                        processed_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{data}"}
+                        })
+                    elif item_type == "file" and item.get("mime_type") == "application/pdf":
+                        try:
+                            data = item.get("data", "")
+                            pdf_bytes = base64.b64decode(data)
+                            filename = item.get("metadata", {}).get("filename", "uploaded.pdf")
+                            
+                            # Special handling for Qwen: Upload to DashScope
+                            llm_provider = Config.LLM_PROVIDER.lower()
+                            
+                            if llm_provider == 'qwen':
+                                logger.info(f"📤 Uploading {filename} to DashScope for Qwen-Long...")
+                                file_id = QwenFileService.upload_file(pdf_bytes, filename)
+                                
+                                if file_id:
+                                    logger.info(f"✅ File uploaded successfully: {file_id}")
+                                    uploaded_file_ids.append(file_id)
+                                    
+                                    # Don't add anything to processed_content for files
+                                    # Frontend already has file preview from optimistic message
+                                    # Backend only needs to store file_id in metadata for agent
+                                    
+                                    logger.info(f"📄 File ID stored in metadata. Agent will reference it in system message.")
+                                else:
+                                    logger.error("❌ Qwen upload failed")
+                                    processed_content.append({
+                                        "type": "text",
+                                        "text": f"\n[Error: Failed to upload file {filename} to Qwen service]\n"
+                                    })
+                            else:
+                                # For other providers (DeepSeek/OpenAI) that don't support native PDF upload
+                                logger.warning(f"⚠️  Native file upload not supported for provider: {llm_provider}")
+                                # Add a warning message
+                                processed_content.append({
+                                    "type": "text",
+                                    "text": f"\n[Warning: File {filename} cannot be processed. Current model provider ({llm_provider}) does not support direct PDF file upload. Please use Qwen-Long for PDF support.]\n"
+                                })
+
+                        except Exception as e:
+                            logger.error(f"❌ Error processing PDF: {str(e)}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            filename = item.get("metadata", {}).get("filename", "uploaded.pdf")
+                            processed_content.append({
+                                "type": "text",
+                                "text": f"\n\n[Error processing file {filename}: {str(e)}]\n\n"
+                            })
+                
+                # Update content to be the processed list which includes extracted text
+                if processed_content:
+                    content = processed_content
+                else:
+                    content = ""
             
-            metadata = {}
-            if isinstance(msg, dict) and msg.get("id"):
-                metadata["client_message_id"] = str(msg.get("id"))
+            if uploaded_file_ids:
+                metadata["file_ids"] = uploaded_file_ids
 
             if msg_type in ["user", "human"]:
-                langchain_messages.append(HumanMessage(content=content, additional_kwargs=metadata))
+                langchain_messages.append(
+                    HumanMessage(content=content, additional_kwargs=metadata)
+                )
             elif msg_type in ["assistant", "ai"]:
-                langchain_messages.append(AIMessage(content=content, additional_kwargs=metadata))
+                langchain_messages.append(
+                    AIMessage(content=content, additional_kwargs=metadata)
+                )
     
     # Prepare state
     config = request.config or {}
@@ -302,23 +379,45 @@ async def create_run(thread_id: str, request: MessageRequest):
             # Helper to convert LangChain messages into frontend format
             def format_langchain_messages(messages, existing_ids=None):
                 formatted = []
-                seen = set(existing_ids or [])
+                # Don't use 'seen' set - let frontend handle deduplication by ID
+                # Backend should preserve original IDs, not generate new ones
                 for idx, msg in enumerate(messages):
                     if isinstance(msg, (AIMessage, HumanMessage)):
                         msg_type = "ai" if isinstance(msg, AIMessage) else "human"
-                        content_str = ""
+                        
+                        formatted_content = []
                         if isinstance(msg.content, str):
-                            content_str = msg.content
+                            formatted_content = [{"type": "text", "text": msg.content}]
                         elif isinstance(msg.content, list):
-                            text_parts = []
                             for item in msg.content:
-                                if isinstance(item, dict) and item.get("type") == "text":
-                                    text_parts.append(item.get("text", ""))
+                                if isinstance(item, dict):
+                                    if item.get("type") == "text":
+                                        formatted_content.append(item)
+                                    elif item.get("type") == "image_url":
+                                        # Try to restore base64 image for frontend
+                                        url = item.get("image_url", {}).get("url", "")
+                                        if url.startswith("data:"):
+                                            try:
+                                                # data:image/png;base64,......
+                                                header, data = url.split(",", 1)
+                                                mime = header.split(":")[1].split(";")[0]
+                                                formatted_content.append({
+                                                    "type": "image",
+                                                    "source_type": "base64",
+                                                    "mime_type": mime,
+                                                    "data": data
+                                                })
+                                            except:
+                                                formatted_content.append({"type": "text", "text": "[Image]"})
+                                        else:
+                                            formatted_content.append({"type": "text", "text": f"[Image: {url}]"})
+                                    else:
+                                        # Keep other types as text representation if unknown
+                                        formatted_content.append({"type": "text", "text": str(item)})
                                 else:
-                                    text_parts.append(str(item))
-                            content_str = " ".join(text_parts)
+                                    formatted_content.append({"type": "text", "text": str(item)})
                         else:
-                            content_str = str(msg.content)
+                            formatted_content = [{"type": "text", "text": str(msg.content)}]
 
                         msg_id = None
                         if hasattr(msg, "id") and msg.id:
@@ -329,20 +428,27 @@ async def create_run(thread_id: str, request: MessageRequest):
                                 or msg.additional_kwargs.get("id", "")
                             )
 
-                        if not msg_id or msg_id in seen:
-                            content_hash = hashlib.md5((content_str + msg_type + str(idx)).encode()).hexdigest()[:12]
+                        if not msg_id:
+                            # Only generate hash ID if no ID exists at all
+                            # Don't check 'seen' - preserve original IDs across multiple SSE events
+                            content_str_for_hash = json.dumps(formatted_content, sort_keys=True)
+                            content_hash = hashlib.md5((content_str_for_hash + msg_type + str(idx)).encode()).hexdigest()[:12]
                             msg_id = f"{msg_type}-{content_hash}"
-                            counter = 0
-                            while msg_id in seen:
-                                counter += 1
-                                msg_id = f"{msg_type}-{content_hash}-{counter}"
-
-                        seen.add(msg_id)
-                        formatted.append({
+                        if msg_type == "human":
+                            logger.info(
+                                "🔍 Formatting human message: id=%s has_client_id=%s content_preview=%s",
+                                msg_id,
+                                "client_message_id" in getattr(msg, "additional_kwargs", {}),
+                                str(formatted_content)[:100],
+                            )
+                        formatted_msg = {
                             "id": msg_id,
                             "type": msg_type,
-                            "content": [{"type": "text", "text": content_str}],
-                        })
+                            "content": formatted_content,
+                        }
+                        if hasattr(msg, "additional_kwargs") and isinstance(msg.additional_kwargs, dict) and msg.additional_kwargs:
+                            formatted_msg["additional_kwargs"] = msg.additional_kwargs
+                        formatted.append(formatted_msg)
                 return formatted
 
             all_messages_seen: list[dict] = []  # Track all messages we've seen to ensure completeness
@@ -390,6 +496,25 @@ async def create_run(thread_id: str, request: MessageRequest):
                                 all_messages_seen.append(new_msg)
 
                     formatted_state["messages"] = all_messages_seen.copy()
+                    try:
+                        human_ids = [
+                            (msg.get("id"), msg.get("additional_kwargs", {}).get("client_message_id"))
+                            for msg in formatted_state["messages"]
+                            if isinstance(msg, dict) and msg.get("type") == "human"
+                        ]
+                        assistant_ids = [
+                            msg.get("id")
+                            for msg in formatted_state["messages"]
+                            if isinstance(msg, dict) and msg.get("type") == "ai"
+                        ]
+                        logger.info(
+                            "📨 Emitting %d message(s) via SSE | human_ids=%s | assistant_ids=%s",
+                            len(formatted_state["messages"]),
+                            human_ids,
+                            assistant_ids,
+                        )
+                    except Exception as log_err:
+                        logger.warning("Failed to log emitted message IDs: %s", log_err)
 
                     for raw_msg in reversed(raw_messages):
                         if isinstance(raw_msg, AIMessage):

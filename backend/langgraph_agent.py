@@ -3,12 +3,11 @@ LangGraph Agent for CyPlanAI - Cybersecurity Planning Assistant
 Integrates with existing database models and knowledge base
 """
 import os
+import logging
 from typing import Annotated, TypedDict, List, Dict, Any
 from typing_extensions import Literal
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_community.chat_models import ChatOllama
@@ -18,6 +17,8 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.tools import tool
 
 from config import Config
+
+logger = logging.getLogger(__name__)
 from models import db, Framework, Plan, Control, Threat
 from services.knowledge_base import KnowledgeBase
 from services.plan_generator import generate_plan_summary
@@ -55,6 +56,13 @@ def get_llm():
             model=Config.OLLAMA_MODEL,
             temperature=0.4
         )
+    elif provider == 'qwen' and Config.DASHSCOPE_API_KEY:
+        return ChatOpenAI(
+            api_key=Config.DASHSCOPE_API_KEY,
+            base_url=Config.DASHSCOPE_BASE_URL,
+            model=Config.QWEN_MODEL,
+            temperature=0.4
+        )
     # Fallback to OpenAI with default
     return ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
 
@@ -67,6 +75,77 @@ class AgentState(TypedDict):
 
 
 # Define tools for the agent - these need Flask app context
+def extract_text_from_message(message) -> str:
+    """
+    Helper to extract text from a message content which can be string, list, or other types.
+    Always returns a string (may be empty).
+    """
+    if isinstance(message.content, str):
+        return message.content
+    
+    if isinstance(message.content, list):
+        text_parts = []
+        for item in message.content:
+            if isinstance(item, dict):
+                # Handle {"type": "text", "text": "..."}
+                if item.get("type") == "text" and "text" in item:
+                    text_parts.append(str(item.get("text", "")))
+                # Handle other dict structures
+                elif "content" in item:
+                    text_parts.append(str(item.get("content", "")))
+            elif isinstance(item, str):
+                text_parts.append(item)
+            else:
+                # Fallback: convert to string
+                text_parts.append(str(item))
+        return " ".join(text_parts)
+    
+    # Fallback: convert any other type to string
+    if message.content is not None:
+        return str(message.content)
+    
+    return ""
+
+
+def normalize_message(message: BaseMessage) -> BaseMessage:
+    """
+    Ensure message content is a plain string (required by OpenAI-compatible APIs).
+    
+    This is critical for DashScope API compatibility:
+    - All message content must be strings, not lists or dicts
+    - ToolMessage content must be non-empty strings
+    - Empty content will cause 400 errors
+    """
+    # If content is already a string and non-empty, return as-is
+    if isinstance(message.content, str) and message.content.strip():
+        return message
+    
+    # Extract text from complex content structures
+    text = extract_text_from_message(message)
+    
+    # Ensure text is not empty - DashScope requires non-empty content
+    if not text or not text.strip():
+        text = "(empty message)"
+    
+    # Reconstruct message with normalized content
+    if isinstance(message, HumanMessage):
+        return HumanMessage(content=text, additional_kwargs=message.additional_kwargs)
+    if isinstance(message, AIMessage):
+        return AIMessage(content=text, additional_kwargs=message.additional_kwargs)
+    if isinstance(message, SystemMessage):
+        return SystemMessage(content=text)
+    if isinstance(message, ToolMessage):
+        # ToolMessage requires content to be a string
+        return ToolMessage(
+            content=text,
+            tool_call_id=message.tool_call_id,
+            additional_kwargs=message.additional_kwargs
+        )
+    
+    # Fallback: return original message
+    return message
+
+
 def get_framework_info_tool(framework_id: str = None) -> str:
     """Get information about a cybersecurity framework. If no framework_id is provided, returns all frameworks."""
     from app import create_app
@@ -185,30 +264,48 @@ Start by greeting the user and asking about their cybersecurity planning goals."
 
 def create_agent_node(llm):
     """Create the main agent node that processes messages"""
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        MessagesPlaceholder(variable_name="messages"),
-    ])
-    
-    chain = prompt | llm
-    
+
     def agent_node(state: AgentState):
         # Get knowledge base context for the latest user message
         user_messages = [msg for msg in state["messages"] if isinstance(msg, HumanMessage)]
+        kb_context = ""
+        file_ids: List[str] = []
         if user_messages:
-            latest_user_msg = user_messages[-1].content
-            kb_context = KnowledgeBase.get_context_for_question(latest_user_msg)
-            
-            # Create an enhanced system message with KB context
-            enhanced_system = SystemMessage(
-                content=SYSTEM_PROMPT + f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}"
+            latest_user_msg = user_messages[-1]
+            kb_context = KnowledgeBase.get_context_for_question(extract_text_from_message(latest_user_msg))
+            file_ids = latest_user_msg.additional_kwargs.get("file_ids", [])
+
+        system_text = SYSTEM_PROMPT
+        if kb_context:
+            system_text += f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}"
+        if file_ids:
+            system_text += (
+                "\n\nREFERENCE FILES:\n"
+                + "\n".join(f"- fileid://{fid}" for fid in file_ids)
+                + "\nUse these uploaded documents when crafting your answer."
             )
-            enhanced_messages = [enhanced_system] + state["messages"]
-            enhanced_state = {**state, "messages": enhanced_messages}
-        else:
-            enhanced_state = state
-        
-        response = chain.invoke(enhanced_state)
+
+        enhanced_system = SystemMessage(content=system_text)
+        user_messages_only = [
+            msg for msg in state["messages"] if not isinstance(msg, SystemMessage)
+        ]
+
+        logger.debug(
+            "Invoking LLM with file_ids=%s system_prompt_preview=%s",
+            file_ids,
+            system_text[-500:],
+        )
+
+        normalized_messages = [
+            normalize_message(enhanced_system),
+            *[normalize_message(msg) for msg in user_messages_only],
+        ]
+
+        llm_to_use = llm
+        if file_ids:
+            llm_to_use = llm.bind(extra_body={"file_ids": file_ids})
+
+        response = llm_to_use.invoke(normalized_messages)
         return {"messages": [response]}
     
     return agent_node
@@ -244,32 +341,63 @@ def create_agent_graph(user_id: str = None, plan_id: str = None):
         # Get knowledge base context for the latest user message
         user_messages = [msg for msg in state["messages"] if isinstance(msg, HumanMessage)]
         kb_context = ""
+        file_ids: List[str] = []
+        
         if user_messages:
-            latest_user_msg = user_messages[-1].content
-            kb_context = KnowledgeBase.get_context_for_question(latest_user_msg)
+            latest_user_msg = user_messages[-1]
+            user_text = extract_text_from_message(latest_user_msg).strip()
+            if user_text:
+                kb_context = KnowledgeBase.get_context_for_question(user_text)
+            file_ids = latest_user_msg.additional_kwargs.get("file_ids", [])
         
-        # Create enhanced system message
-        enhanced_system = SystemMessage(
-            content=SYSTEM_PROMPT + (f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}" if kb_context else "")
-        )
-        enhanced_messages = [enhanced_system] + state["messages"]
-        
-        # Use prompt template
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        
-        # Update the last system message with KB context if available
+        # Build system message with KB context
+        system_text = SYSTEM_PROMPT
         if kb_context:
-            messages_with_context = [
-                SystemMessage(content=SYSTEM_PROMPT + f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}"),
-                *[msg for msg in state["messages"] if not isinstance(msg, SystemMessage)]
-            ]
-        else:
-            messages_with_context = enhanced_messages
+            system_text += f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}"
         
-        response = llm_with_tools.invoke(messages_with_context)
+        enhanced_system = SystemMessage(content=system_text)
+        
+        # Per official docs: file references must be in SEPARATE system messages
+        # See: https://www.alibabacloud.com/help/en/model-studio/long-context-qwen-long
+        file_system_messages = []
+        if file_ids:
+            logger.info(f"📎 Adding {len(file_ids)} file reference(s) as separate system messages")
+            for fid in file_ids:
+                file_system_messages.append(SystemMessage(content=f"fileid://{fid}"))
+        
+        user_messages_only = [
+            msg for msg in state["messages"] if not isinstance(msg, SystemMessage)
+        ]
+
+        logger.debug(
+            "Invoking LLM(with tools) file_ids=%s system_prompt_preview=%s",
+            file_ids,
+            system_text[-500:],
+        )
+
+        # Construct messages: [main_system, file_systems..., user_messages...]
+        normalized_messages = [
+            normalize_message(enhanced_system),
+            *[normalize_message(msg) for msg in file_system_messages],
+            *[normalize_message(msg) for msg in user_messages_only],
+        ]
+        
+        # Debug: log message structure before sending to DashScope
+        logger.info("📨 Messages being sent to LLM:")
+        for i, msg in enumerate(normalized_messages):
+            msg_type = type(msg).__name__
+            content_preview = str(msg.content)[:100] if msg.content else "(empty)"
+            logger.info(f"  [{i}] {msg_type}: {content_preview}...")
+            if hasattr(msg, 'tool_call_id'):
+                logger.info(f"      tool_call_id: {msg.tool_call_id}")
+        
+        llm_to_use = llm_with_tools
+        if file_ids:
+            llm_to_use = llm_with_tools.bind(extra_body={"file_ids": file_ids})
+            logger.info(f"🔗 Binding file_ids to LLM: {file_ids}")
+        
+        response = llm_to_use.invoke(normalized_messages)
+        logger.info(f"✅ LLM response received: {type(response).__name__}")
         
         return {"messages": [response]}
     

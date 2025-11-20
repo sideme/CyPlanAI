@@ -86,6 +86,151 @@ const getMessageSignature = (message: StreamMessage): string => {
   return `${type}:${content}`;
 };
 
+const getCanonicalId = (message?: StreamMessage): string | undefined => {
+  if (!message) return undefined;
+  const additional =
+    ((message as Record<string, unknown>)?.additional_kwargs ??
+      {}) as Record<string, unknown>;
+  const directClientId = (message as Record<string, unknown>)?.[
+    "client_message_id"
+  ];
+  return (
+    (additional?.["client_message_id"] as string | undefined) ??
+    (directClientId as string | undefined) ??
+    (message.id as string | undefined) ??
+    (additional?.["id"] as string | undefined)
+  );
+};
+
+const dedupeByCanonicalId = (messages: StreamMessage[]): StreamMessage[] => {
+  const order: string[] = [];
+  const map = new Map<string, StreamMessage>();
+  const withoutId: StreamMessage[] = [];
+
+  messages.forEach((msg) => {
+    const canonicalId = getCanonicalId(msg);
+    if (!canonicalId) {
+      withoutId.push({ ...msg });
+      return;
+    }
+
+    if (!map.has(canonicalId)) {
+      order.push(canonicalId);
+    }
+
+    map.set(canonicalId, {
+      ...msg,
+      clientOptimistic: Boolean(msg?.clientOptimistic),
+    });
+  });
+
+  return [...order.map((key) => map.get(key)!), ...withoutId];
+};
+
+const toTextBlock = (value: unknown) => {
+  if (value == null) return undefined;
+  if (typeof value === "object" && value && "type" in (value as any)) {
+    return value;
+  }
+  return { type: "text", text: String(value) };
+};
+
+const mergeOptimisticContent = (
+  optimistic?: StreamMessage,
+  incoming?: StreamMessage,
+): StreamMessage["content"] => {
+  const optimisticContent = optimistic?.content;
+  const incomingContent = incoming?.content;
+
+  const attachments: any[] = [];
+  if (Array.isArray(optimisticContent)) {
+    optimisticContent.forEach((item) => {
+      if (
+        item &&
+        typeof item === "object" &&
+        "type" in item &&
+        (item as any).type !== "text"
+      ) {
+        attachments.push(item);
+      }
+    });
+  }
+
+  const textBlocks: any[] = [];
+  if (typeof incomingContent === "string") {
+    textBlocks.push({ type: "text", text: incomingContent });
+  } else if (Array.isArray(incomingContent)) {
+    incomingContent.forEach((item) => {
+      // Skip file/image blocks - they should come from optimistic message
+      if (
+        item &&
+        typeof item === "object" &&
+        "type" in item &&
+        (item as any).type !== "text"
+      ) {
+        return; // Skip non-text blocks from incoming message
+      }
+      const block = toTextBlock(item);
+      if (block) textBlocks.push(block);
+    });
+  } else if (incomingContent != null) {
+    // Skip file/image blocks from incoming message
+    if (
+      typeof incomingContent === "object" &&
+      "type" in (incomingContent as any) &&
+      (incomingContent as any).type !== "text"
+    ) {
+      // Don't add non-text blocks from incoming message
+    } else {
+      const block = toTextBlock(incomingContent);
+      if (block) textBlocks.push(block);
+    }
+  }
+
+  if (textBlocks.length === 0 && Array.isArray(optimisticContent)) {
+    optimisticContent.forEach((item) => {
+      if (
+        item &&
+        typeof item === "object" &&
+        (item as any).type === "text"
+      ) {
+        textBlocks.push(item);
+      }
+    });
+  }
+
+  if (attachments.length === 0) {
+    if (textBlocks.length > 0) return textBlocks;
+    return incomingContent ?? optimisticContent;
+  }
+
+  return [...attachments, ...textBlocks];
+};
+
+const messagesAreEqual = (
+  a: StreamMessage[],
+  b: StreamMessage[],
+): boolean => {
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  for (let i = 0; i < a.length; i += 1) {
+    const aMsg = a[i];
+    const bMsg = b[i];
+    const aKey = getCanonicalId(aMsg) ?? aMsg.id ?? `idx-${i}`;
+    const bKey = getCanonicalId(bMsg) ?? bMsg.id ?? `idx-${i}`;
+    if (aKey !== bKey) {
+      return false;
+    }
+
+    if (JSON.stringify(aMsg) !== JSON.stringify(bMsg)) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const StreamSession = ({
   children,
   apiKey,
@@ -146,29 +291,46 @@ const StreamSession = ({
               nextMessages[optimisticIndex] = {
                 ...existingMessage,
                 ...msg,
+                content: mergeOptimisticContent(existingMessage, msg),
                 id: resolvedId,
                 clientOptimistic: false,
               };
               return;
             }
 
-            const id: string = msg.id ?? crypto.randomUUID();
-            const existingIndex = nextMessages.findIndex((m) => (m.id ?? "") === id);
+            const canonicalId =
+              getCanonicalId(msg) ?? msg.id ?? crypto.randomUUID();
+
+            const existingIndex = nextMessages.findIndex(
+              (m) =>
+                getCanonicalId(m) === canonicalId ||
+                (m.id ?? "") === (msg.id ?? ""),
+            );
             if (existingIndex >= 0) {
               nextMessages[existingIndex] = {
                 ...nextMessages[existingIndex],
                 ...msg,
+                content: mergeOptimisticContent(nextMessages[existingIndex], msg),
+                id: msg.id ?? nextMessages[existingIndex].id ?? canonicalId,
                 clientOptimistic: false,
               };
               return;
             }
 
-            nextMessages.push({ ...msg, id, clientOptimistic: false });
+            nextMessages.push({
+              ...msg,
+              id: msg.id ?? canonicalId,
+              clientOptimistic: false,
+            });
           });
         }
       });
       if (nextMessages.length > 0) {
-        setDirectSSEMessages(nextMessages);
+        const deduped = dedupeByCanonicalId(nextMessages);
+        if (messagesAreEqual(deduped, directSSEMessagesRef.current)) {
+          return;
+        }
+        setDirectSSEMessages(deduped);
       }
     },
     onThreadId: (id: string | null) => {
@@ -189,38 +351,169 @@ const StreamSession = ({
     if (currentValues?.messages && Array.isArray(currentValues.messages)) {
       const incomingMessages = currentValues.messages as StreamMessage[];
       const existingMessages = directSSEMessagesRef.current;
-      const matchedOptimisticIndexes = new Set<number>();
+      
+      // Build a map of existing messages by ID for efficient lookup
+      const existingByCanonical = new Map<string, StreamMessage>();
+      const existingOptimistic: StreamMessage[] = [];
+      
+      existingMessages.forEach((msg) => {
+        if (msg?.clientOptimistic) {
+          existingOptimistic.push(msg);
+        } else if (msg?.id) {
+          const canonicalId = getCanonicalId(msg) ?? msg.id;
+          existingByCanonical.set(canonicalId, msg);
+        }
+      });
 
-      const normalizedIncoming = incomingMessages.map((msg: StreamMessage) => {
+      // Process incoming messages: replace optimistic, dedupe by ID
+      // IMPORTANT: Maintain the order of incoming messages
+      const processedMessages: StreamMessage[] = [];
+      const matchedOptimisticIndexes = new Set<number>();
+      const seenCanonicalIds = new Set<string>();
+      
+      incomingMessages.forEach((msg: StreamMessage) => {
+        const canonicalId = getCanonicalId(msg);
+        const effectiveId = canonicalId ?? msg?.id ?? crypto.randomUUID();
+        
+        // Skip if we've already processed this ID in this batch
+        if (seenCanonicalIds.has(effectiveId)) {
+          console.log(
+            `[SSE] Skipping duplicate message in incoming batch: ${effectiveId.substring(
+              0,
+              8,
+            )}...`,
+          );
+          return;
+        }
+        
+        seenCanonicalIds.add(effectiveId);
+        
+        // Check if this matches an optimistic message
         const signature = getMessageSignature(msg);
-        const optimisticIndex = existingMessages.findIndex((existing, idx) => {
+        const optimisticIndex = existingOptimistic.findIndex((existing, idx) => {
           if (matchedOptimisticIndexes.has(idx)) return false;
-          return Boolean(existing?.clientOptimistic) && getMessageSignature(existing) === signature;
+          return getMessageSignature(existing) === signature;
         });
 
         if (optimisticIndex !== -1) {
+          // Replace optimistic message
           matchedOptimisticIndexes.add(optimisticIndex);
-          const optimisticMessage = existingMessages[optimisticIndex];
-          return {
+          const optimisticMessage = existingOptimistic[optimisticIndex];
+          const finalCanonicalId =
+            canonicalId ??
+            getCanonicalId(optimisticMessage) ??
+            crypto.randomUUID();
+          processedMessages.push({
             ...optimisticMessage,
             ...msg,
-            id: msg.id ?? optimisticMessage.id ?? crypto.randomUUID(),
+            content: mergeOptimisticContent(optimisticMessage, msg),
+            id: msg.id ?? optimisticMessage.id ?? finalCanonicalId,
             clientOptimistic: false,
-          };
+          });
+        } else if (canonicalId && existingByCanonical.has(canonicalId)) {
+          // Message already exists (by ID), just use the incoming version (it may have updates)
+          const existing = existingByCanonical.get(canonicalId)!;
+          processedMessages.push({
+            ...existing,
+            ...msg,
+            content: mergeOptimisticContent(existing, msg),
+            id: msg.id ?? existing.id ?? canonicalId,
+            clientOptimistic: false,
+          });
+          existingByCanonical.delete(canonicalId);
+        } else {
+          // New message
+          const fallbackCanonical = canonicalId ?? effectiveId;
+          processedMessages.push({
+            ...msg,
+            id: msg.id ?? fallbackCanonical,
+            clientOptimistic: false,
+          });
         }
-
-        return {
-          ...msg,
-          id: msg.id ?? crypto.randomUUID(),
-          clientOptimistic: false,
-        };
       });
 
-      const preservedExisting = existingMessages.filter((_, idx) => !matchedOptimisticIndexes.has(idx));
+      // Preserve unmatched optimistic messages
+      const preservedOptimistic = existingOptimistic.filter((_, idx) => !matchedOptimisticIndexes.has(idx));
+      
+      // Preserve existing messages that weren't in the incoming batch (historical messages)
+      // Keep them in their original order from existingMessages
+      // IMPORTANT: We need to maintain chronological order
+      const processedIds = new Set(processedMessages.map(m => getCanonicalId(m) ?? m.id));
+      const preservedHistorical: StreamMessage[] = [];
+      existingMessages.forEach((msg) => {
+        if (!msg?.clientOptimistic && msg?.id) {
+          const canonicalId = getCanonicalId(msg) ?? msg.id;
+          // Only include if it wasn't in the incoming batch
+          if (!processedIds.has(canonicalId) && existingByCanonical.has(canonicalId)) {
+            preservedHistorical.push(msg);
+          }
+        }
+      });
 
-      setDirectSSEMessages([...preservedExisting, ...normalizedIncoming]);
+      // Debug: Log message order
+      console.log('[SSE-ORDER] === Message Order Debug ===');
+      console.log('[SSE-ORDER] Incoming from backend:', incomingMessages.length, 'messages');
+      incomingMessages.forEach((msg, idx) => {
+        const msgId = getCanonicalId(msg) ?? msg?.id;
+        const contentPreview = typeof msg.content === 'string' 
+          ? msg.content.substring(0, 50) 
+          : Array.isArray(msg.content) 
+            ? JSON.stringify(msg.content).substring(0, 50)
+            : '';
+        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
+      });
+      
+      console.log('[SSE-ORDER] Processed messages:', processedMessages.length);
+      processedMessages.forEach((msg, idx) => {
+        const msgId = getCanonicalId(msg) ?? msg?.id;
+        const contentPreview = typeof msg.content === 'string' 
+          ? msg.content.substring(0, 50) 
+          : Array.isArray(msg.content) 
+            ? JSON.stringify(msg.content).substring(0, 50)
+            : '';
+        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
+      });
+      
+      console.log('[SSE-ORDER] Preserved historical:', preservedHistorical.length);
+      preservedHistorical.forEach((msg, idx) => {
+        const msgId = getCanonicalId(msg) ?? msg?.id;
+        const contentPreview = typeof msg.content === 'string' 
+          ? msg.content.substring(0, 50) 
+          : Array.isArray(msg.content) 
+            ? JSON.stringify(msg.content).substring(0, 50)
+            : '';
+        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
+      });
+
+      // CRITICAL: Maintain chronological order
+      // Backend may only send current round's messages, not full history
+      // So we need to merge: [historical messages] + [new messages from backend] + [optimistic]
+      const combined = dedupeByCanonicalId([
+        ...preservedHistorical,
+        ...processedMessages,
+        ...preservedOptimistic,
+      ]);
+      
+      console.log('[SSE-ORDER] Final combined:', combined.length);
+      combined.forEach((msg, idx) => {
+        const msgId = getCanonicalId(msg) ?? msg?.id;
+        const contentPreview = typeof msg.content === 'string' 
+          ? msg.content.substring(0, 50) 
+          : Array.isArray(msg.content) 
+            ? JSON.stringify(msg.content).substring(0, 50)
+            : '';
+        console.log(`[SSE-ORDER]   [${idx}] ${msg.type} | ID: ${msgId?.substring(0, 8)}... | ${contentPreview}...`);
+      });
+      
+      if (messagesAreEqual(combined, directSSEMessagesRef.current)) {
+        return;
+      }
+      setDirectSSEMessages(combined);
     } else if (currentMessages.length > 0 && directSSEMessagesRef.current.length === 0) {
-      setDirectSSEMessages(currentMessages as StreamMessage[]);
+      const normalized = dedupeByCanonicalId(
+        currentMessages as StreamMessage[],
+      );
+      setDirectSSEMessages(normalized);
     }
   }, [streamValue.values, streamValue.messages]);
 
