@@ -64,3 +64,9 @@ logs/
 *.db-journal
 cyplanai.db
 
+# Milestone reports (internal use only)
+MILESTONE_5_CHECKLIST.md
+MILESTONE_5_DEVELOPER_REPORT.md
+MILESTONE_5_Developer_Report_EN.md
+MILESTONE_5_开发人员报告_中文.md
+
