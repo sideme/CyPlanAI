@@ -12,6 +12,7 @@ import {
 } from "react";
 import { createClient } from "./client";
 import { useAppState } from "./AppState";
+import { useAuth } from "./Auth";
 
 interface ThreadContextType {
   getThreads: () => Promise<Thread[]>;
@@ -19,6 +20,7 @@ interface ThreadContextType {
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   threadsLoading: boolean;
   setThreadsLoading: Dispatch<SetStateAction<boolean>>;
+  renameThread: (threadId: string, title: string | null) => Promise<void>;
 }
 
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
@@ -35,12 +37,14 @@ function getThreadSearchMetadata(
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
   const { apiUrl, assistantId } = useAppState();
+  const { token } = useAuth();
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
 
   const getThreads = useCallback(async (): Promise<Thread[]> => {
     if (!apiUrl || !assistantId) return [];
-    const client = createClient(apiUrl, getApiKey() ?? undefined);
+    const authToken = token ?? getApiKey() ?? undefined;
+    const client = createClient(apiUrl, authToken);
 
     const threads = await client.threads.search({
       metadata: {
@@ -50,7 +54,46 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     });
 
     return threads;
-  }, [apiUrl, assistantId]);
+  }, [apiUrl, assistantId, token]);
+
+  const renameThread = useCallback(
+    async (threadId: string, title: string | null) => {
+      if (!apiUrl || !token) {
+        throw new Error("Missing API configuration or authentication");
+      }
+      const response = await fetch(`${apiUrl}/threads/${threadId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ title }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const message =
+          payload?.error ?? payload?.message ?? "Failed to update thread title";
+        throw new Error(message);
+      }
+      const data = (await response.json()) as {
+        metadata?: Record<string, unknown>;
+      };
+      setThreads((prev) =>
+        prev.map((thread) =>
+          thread.thread_id === threadId
+            ? {
+                ...thread,
+                metadata: {
+                  ...(thread.metadata ?? {}),
+                  ...(data.metadata ?? {}),
+                },
+              }
+            : thread,
+        ),
+      );
+    },
+    [apiUrl, token],
+  );
 
   const value = {
     getThreads,
@@ -58,6 +101,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     setThreads,
     threadsLoading,
     setThreadsLoading,
+    renameThread,
   };
 
   return (

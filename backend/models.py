@@ -293,6 +293,9 @@ class ChatThread(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     threadId = db.Column(db.String(64), unique=True, nullable=False, index=True)
     userId = db.Column(db.String(36), db.ForeignKey('users.userId'), nullable=True)
+    title = db.Column(db.String(255))
+    auto_title = db.Column(db.String(255))
+    last_message_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -303,6 +306,9 @@ class ChatThread(db.Model):
         data = {
             'threadId': self.threadId,
             'userId': self.userId,
+            'title': self.title,
+            'auto_title': self.auto_title,
+            'last_message_at': self.last_message_at.isoformat() if self.last_message_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -333,4 +339,41 @@ class ChatMessage(db.Model):
             'tokenUsage': self.tokenUsage,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class UserPreferences(db.Model):
+    """User preferences for UI settings, persisted across sessions and devices."""
+    __tablename__ = 'user_preferences'
+
+    id = db.Column(db.Integer, primary_key=True)
+    userId = db.Column(db.String(36), db.ForeignKey('users.userId'), unique=True, nullable=False, index=True)
+    theme = db.Column(db.String(10), default='dark')  # 'light' or 'dark'
+    hideToolCalls = db.Column(db.Boolean, default=False)
+    apiUrl = db.Column(db.String(255), nullable=True)  # Custom API URL override
+    assistantId = db.Column(db.String(100), nullable=True)  # Custom assistant ID override
+    sidebarOpen = db.Column(db.Boolean, default=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('preferences', uselist=False, lazy=True))
+
+    def to_dict(self):
+        return {
+            'userId': self.userId,
+            'theme': self.theme,
+            'hideToolCalls': self.hideToolCalls,
+            'apiUrl': self.apiUrl,
+            'assistantId': self.assistantId,
+            'sidebarOpen': self.sidebarOpen,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    @classmethod
+    def get_or_create(cls, user_id):
+        """Get existing preferences or create default ones for a user."""
+        prefs = cls.query.filter_by(userId=user_id).first()
+        if not prefs:
+            prefs = cls(userId=user_id)
+            db.session.add(prefs)
+            db.session.commit()
+        return prefs
 

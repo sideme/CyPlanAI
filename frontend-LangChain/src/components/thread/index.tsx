@@ -1,10 +1,8 @@
 import { v4 as uuidv4 } from "uuid";
-import { ReactNode, useEffect, useRef, useMemo } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useRef, useMemo, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useStreamContext, useDirectSSEMessages } from "@/providers/Stream";
 import { useState, FormEvent } from "react";
-import { Button } from "../ui/button";
 import type { StreamCheckpoint, StreamMessage } from "@/types/langgraph";
 import { AssistantMessage, AssistantMessageLoading } from "./messages/ai";
 import { HumanMessage } from "./messages/human";
@@ -13,90 +11,57 @@ import {
   ensureToolCallsHaveResponses,
 } from "@/lib/ensure-tool-responses";
 import type { Message } from "@langchain/langgraph-sdk";
-import { LangGraphLogoSVG } from "../icons/langgraph";
-import { TooltipIconButton } from "./tooltip-icon-button";
-import {
-  ArrowDown,
-  LoaderCircle,
-  PanelRightOpen,
-  PanelRightClose,
-  SquarePen,
-  XIcon,
-  Plus,
-} from "lucide-react";
-import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
-import ThreadHistory from "./history";
+import { XIcon } from "lucide-react";
+import { StickToBottom } from "use-stick-to-bottom";
 import { toast } from "sonner";
+import { useThreads } from "@/providers/Thread";
+import { useAuth } from "@/providers/Auth";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { Label } from "../ui/label";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "../ui/tooltip";
+import { getContentString } from "./utils";
 import { useFileUpload } from "@/hooks/use-file-upload";
-import { ContentBlocksPreview } from "./ContentBlocksPreview";
 import {
   useArtifactOpen,
   ArtifactContent,
   ArtifactTitle,
   useArtifactContext,
 } from "./artifact";
-import { useAppState } from "@/providers/AppState";
-
-function StickyToBottomContent(props: {
-  content: ReactNode;
-  footer?: ReactNode;
-  className?: string;
-  contentClassName?: string;
-}) {
-  const context = useStickToBottomContext();
-  return (
-    <div
-      ref={context.scrollRef}
-      style={{ width: "100%", height: "100%" }}
-      className={props.className}
-    >
-      <div
-        ref={context.contentRef}
-        className={props.contentClassName}
-      >
-        {props.content}
-      </div>
-
-      {props.footer}
-    </div>
-  );
-}
-
-function ScrollToBottom(props: { className?: string }) {
-  const { isAtBottom, scrollToBottom } = useStickToBottomContext();
-
-  if (isAtBottom) return null;
-  return (
-    <Button
-      variant="outline"
-      className={props.className}
-      onClick={() => scrollToBottom()}
-    >
-      <ArrowDown className="h-4 w-4" />
-      <span>Scroll to bottom</span>
-    </Button>
-  );
-}
+import {
+  getDefaultApiUrl,
+  getDefaultAssistantId,
+  useAppState,
+} from "@/providers/AppState";
+import { StickyToBottomContent, ScrollToBottom } from "./components/StickyScroll";
+import { Sidebar } from "./components/Sidebar";
+import { Header } from "./components/Header";
+import { WelcomeScreen } from "./components/WelcomeScreen";
+import { MessageInput } from "./components/MessageInput";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { UserMenu } from "./components/UserMenu";
+import { getApiKey } from "@/lib/api-key";
 
 export function Thread() {
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
 
+  const { user, logout, token } = useAuth();
   const {
     threadId,
     setThreadId: setThreadIdContext,
     chatHistoryOpen,
     setChatHistoryOpen,
+    settingsOpen,
+    setSettingsOpen,
+    searchOpen,
+    setSearchOpen,
+    theme,
+    setTheme,
     hideToolCalls,
     setHideToolCalls,
+    apiUrl,
+    setApiUrl,
+    assistantId,
+    setAssistantId,
+    syncPreferences,
   } = useAppState();
   const [input, setInput] = useState("");
   const {
@@ -111,9 +76,129 @@ export function Thread() {
   } = useFileUpload();
   const [firstTokenReceived, setFirstTokenReceived] = useState(false);
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
+  const inputTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [apiInput, setApiInput] = useState(apiUrl);
+  const [assistantInput, setAssistantInput] = useState(assistantId);
+  const [themeSelection, setThemeSelection] = useState(theme);
+  const [footerMenuOpen, setFooterMenuOpen] = useState(false);
+  const footerMenuRef = useRef<HTMLDivElement | null>(null);
 
   const stream = useStreamContext();
   const directSSE = useDirectSSEMessages();
+  const hydratedThreadRef = useRef<string | null>(null);
+  const previousThreadIdRef = useRef<string | null>(null);
+  const { getThreads, setThreads, threads, renameThread } = useThreads();
+  const currentThreadTitle = useMemo(() => {
+    if (!threadId) return "";
+    const thread = threads.find((t) => t.thread_id === threadId);
+    if (!thread) return "";
+    const metadata = (thread.metadata ?? {}) as Record<string, unknown>;
+    const title =
+      (metadata?.["title"] as string | undefined) ??
+      (metadata?.["auto_title"] as string | undefined);
+    if (title) return title;
+
+    if (
+      typeof thread.values === "object" &&
+      thread.values &&
+      "messages" in thread.values &&
+      Array.isArray(thread.values.messages) &&
+      thread.values.messages.length > 0
+    ) {
+      return (
+        getContentString(thread.values.messages[0].content) ?? "New conversation"
+      );
+    }
+
+    return "New conversation";
+  }, [threadId, threads]);
+
+  const handleRenameThread = useCallback(() => {
+    if (!threadId) return;
+    const defaultValue =
+      currentThreadTitle && currentThreadTitle !== "New conversation"
+        ? currentThreadTitle
+        : "";
+    const result = window.prompt("Enter a new conversation title", defaultValue);
+    if (result === null) return;
+    const trimmed = result.trim();
+    renameThread(threadId, trimmed.length > 0 ? trimmed : null)
+      .then(() => {
+        toast.success("Conversation title updated");
+        return getThreads().then(setThreads).catch(() => undefined);
+      })
+      .catch((error) => {
+        toast.error("Unable to update conversation title", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [threadId, currentThreadTitle, renameThread, getThreads, setThreads]);
+
+  useEffect(() => {
+    if (threadId !== previousThreadIdRef.current) {
+      hydratedThreadRef.current = null;
+      previousThreadIdRef.current = threadId;
+    }
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    if (!apiUrl) return;
+    if (hydratedThreadRef.current === threadId) return;
+    const authToken = token ?? getApiKey();
+    if (!authToken) return;
+
+    const normalizedApiUrl = apiUrl.endsWith("/")
+      ? apiUrl.slice(0, -1)
+      : apiUrl;
+
+    const controller = new AbortController();
+    let cancelled = false;
+
+    const hydrateThreadHistory = async () => {
+      try {
+        const response = await fetch(`${normalizedApiUrl}/threads/${threadId}/state`, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+          signal: controller.signal,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message =
+            payload?.detail ??
+            payload?.message ??
+            `Failed to load conversation history (status ${response.status})`;
+          throw new Error(message);
+        }
+
+        if (cancelled) return;
+
+        const historyMessages = Array.isArray(payload?.values?.messages)
+          ? (payload.values.messages as StreamMessage[])
+          : [];
+
+        directSSE.setMessages((previous) => {
+          if (previous.length > 0) {
+            return previous;
+          }
+          return historyMessages;
+        });
+        hydratedThreadRef.current = threadId;
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("Failed to hydrate conversation history", error);
+        hydratedThreadRef.current = null;
+      }
+    };
+
+    hydrateThreadHistory();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [threadId, apiUrl, token, directSSE.setMessages]);
   
   // Get messages from all sources
   // 1. directSSE.messages - manually intercepted from SSE (most reliable)
@@ -144,22 +229,68 @@ export function Thread() {
       );
     };
 
-    // Since Stream.tsx now handles deduplication properly, we can simplify here
-    // Just remove any exact duplicates that might have slipped through
+    // Get message signature for content-based deduplication
+    const getMessageSignature = (message: StreamMessage): string => {
+      if (!message) return "";
+      const type = message.type ?? "";
+      const content = Array.isArray(message.content)
+        ? JSON.stringify(message.content)
+        : typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content ?? "");
+      return `${type}:${content}`;
+    };
+
+    // Deduplicate by both ID and content signature
+    // For human messages, be more strict about content-based deduplication
     const seenIds = new Set<string>();
+    const seenSignatures = new Set<string>();
     const result: StreamMessage[] = [];
 
     sourceMessages.forEach((message) => {
       if (!message) return;
       
       const msgId = resolveId(message);
+      const signature = getMessageSignature(message);
       
-      if (msgId) {
-        if (seenIds.has(msgId)) {
-          // Skip duplicate
+      // For AI messages, allow updates even if ID is the same (for streaming updates)
+      if (message.type === "ai" && msgId && seenIds.has(msgId)) {
+        // If same ID, check if this is an update (different signature) or exact duplicate
+        const existingIndex = result.findIndex(m => resolveId(m) === msgId);
+        if (existingIndex >= 0) {
+          const existingMsg = result[existingIndex];
+          const existingSignature = getMessageSignature(existingMsg);
+          if (existingSignature === signature) {
+            // Exact duplicate, skip
+            return;
+          }
+          // Different signature with same ID means update, replace the existing one
+          result[existingIndex] = message;
           return;
         }
+      }
+      
+      // Skip if we've seen this ID before (for non-AI messages)
+      if (msgId && seenIds.has(msgId)) {
+        return;
+      }
+      
+      // For human messages, be more strict: skip if we've seen this exact content before
+      // This prevents duplicate human messages from backend
+      if (message.type === "human" && signature && seenSignatures.has(signature)) {
+        return;
+      }
+      
+      // For other message types (tool, etc.), also check signature but allow updates
+      if (signature && seenSignatures.has(signature) && message.type !== "ai") {
+        return;
+      }
+      
+      if (msgId) {
         seenIds.add(msgId);
+      }
+      if (signature) {
+        seenSignatures.add(signature);
       }
       
       result.push(message);
@@ -228,12 +359,139 @@ export function Thread() {
   const lastError = useRef<string | undefined>(undefined);
 
   const setThreadId = (id: string | null) => {
+    // If creating a new thread, first refresh threads list to save current thread to history
+    if (id === null && threadId) {
+      // Refresh threads list to ensure current thread is saved to history
+      getThreads()
+        .then(setThreads)
+        .catch(() => undefined);
+    }
+    
+    // Clear messages when switching threads (including switching to a different thread)
+    // This prevents messages from accumulating when clicking on different history chats.
+    // EXCEPTION: If transitioning from null (creating new) to a valid ID, DO NOT clear,
+    // because we likely have an optimistic message that triggered this creation.
+    if (id !== threadId && !(threadId === null && id !== null)) {
+      directSSE.setMessages([]);
+    }
+    
     setThreadIdContext(id);
 
     // close artifact and reset artifact context
     closeArtifact();
     setArtifactContext({});
   };
+
+  const handleComingSoon = useCallback(() => {
+    toast("Coming soon!");
+  }, []);
+
+  const handleSaveSettings = useCallback(async () => {
+    const normalizedApi = apiInput.trim() || getDefaultApiUrl();
+    const normalizedAssistant = assistantInput.trim() || getDefaultAssistantId();
+    setApiUrl(normalizedApi);
+    setAssistantId(normalizedAssistant);
+    setTheme(themeSelection);
+    
+    // Sync to backend after a short delay to ensure state is updated
+    setTimeout(() => {
+      syncPreferences().catch((err) => {
+        console.error("Failed to sync preferences to server:", err);
+      });
+    }, 100);
+    
+    toast.success("Settings saved");
+    setSettingsOpen(false);
+  }, [
+    apiInput,
+    assistantInput,
+    setApiUrl,
+    setAssistantId,
+    themeSelection,
+    setTheme,
+    setSettingsOpen,
+    syncPreferences,
+  ]);
+  const handleQuickPrompt = useCallback(
+    (value: string) => {
+      if (isLoading) return;
+      setFirstTokenReceived(false);
+
+      const newHumanMessage: StreamMessage = {
+        id: uuidv4(),
+        type: "human",
+        content: [
+          { type: "text", text: value },
+        ] as StreamMessage["content"],
+      };
+
+      const toolMessages = ensureToolCallsHaveResponses(
+        finalMessages as unknown as Message[],
+      ) as unknown as StreamMessage[];
+
+      const context =
+        Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
+
+      directSSE.addOptimisticMessage({ ...newHumanMessage, clientOptimistic: true });
+
+      // Note: LangGraph SDK should automatically create a thread when threadId is null
+      // via the onThreadId callback. The stream.submit will trigger thread creation.
+      stream.submit(
+        {
+          messages: [...toolMessages, newHumanMessage] as unknown as Message[],
+          context,
+        },
+        {
+          streamMode: ["values", "updates"],
+          streamSubgraphs: true,
+          streamResumable: true,
+          optimisticValues: (prev: Record<string, any>) => ({
+            ...prev,
+            context,
+            messages: [
+              ...(prev.messages ?? []),
+              ...toolMessages,
+              newHumanMessage,
+            ],
+          }),
+        },
+      );
+
+      setInput("");
+      setContentBlocks([]);
+    },
+    [isLoading, finalMessages, artifactContext, directSSE, stream, setFirstTokenReceived, setInput, setContentBlocks],
+  );
+
+  const quickPrompts = useMemo(
+    () => [
+      {
+        title: "Start a readiness checklist",
+        description: "Draft an ISO 27001 readiness checklist for our next audit.",
+        value:
+          "Generate an ISO 27001 readiness checklist for our organization, highlighting the top gaps to close before the next audit.",
+      },
+      {
+        title: "Summarize compliance plan",
+        description: "Turn my compliance plan notes into a concise brief.",
+        value:
+          "Summarize my latest cybersecurity compliance plan into key actions, stakeholders, and milestones.",
+      },
+      {
+        title: "Explain control requirements",
+        description: "Break down NIST CSF PR.AC controls in simple terms.",
+        value:
+          "Explain the NIST CSF PR.AC (Access Control) category in simple language for business stakeholders.",
+      },
+      {
+        title: "Awareness training ideas",
+        description: "Outline topics for next month's awareness session.",
+        value:
+          "Create a cybersecurity awareness session outline for next month focused on phishing and credential safety.",
+      },
+    ],
+    [],
+  );
 
   useEffect(() => {
     if (!stream.error) {
@@ -262,6 +520,34 @@ export function Thread() {
       // no-op
     }
   }, [stream.error]);
+
+  useEffect(() => {
+    setApiInput(apiUrl);
+  }, [apiUrl]);
+
+  useEffect(() => {
+    setAssistantInput(assistantId);
+  }, [assistantId]);
+
+  useEffect(() => {
+    setThemeSelection(theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const handleOutside = (event: MouseEvent) => {
+      if (
+        footerMenuRef.current &&
+        !footerMenuRef.current.contains(event.target as Node)
+      ) {
+        setFooterMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleOutside);
+    };
+  }, []);
 
   // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
@@ -301,6 +587,8 @@ export function Thread() {
 
     directSSE.addOptimisticMessage({ ...newHumanMessage, clientOptimistic: true });
 
+    // Note: LangGraph SDK should automatically create a thread when threadId is null
+    // via the onThreadId callback. The stream.submit will trigger thread creation.
     stream.submit(
       {
         messages: [...toolMessages, newHumanMessage] as unknown as Message[],
@@ -346,150 +634,76 @@ export function Thread() {
   );
 
   return (
-    <div className="flex h-screen w-full overflow-hidden">
-      <div className="relative hidden lg:flex">
-        <motion.div
-          className="absolute z-20 h-full overflow-hidden border-r bg-white"
-          style={{ width: 300 }}
-          animate={
-            isLargeScreen
-              ? { x: chatHistoryOpen ? 0 : -300 }
-              : { x: chatHistoryOpen ? 0 : -300 }
-          }
-          initial={{ x: -300 }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
-        >
-          <div
-            className="relative h-full"
-            style={{ width: 300 }}
-          >
-            <ThreadHistory />
-          </div>
-        </motion.div>
-      </div>
+    <div
+      className={cn(
+        "flex h-screen w-full overflow-hidden bg-background text-foreground",
+        !chatStarted && "dark:bg-[#050B15] dark:text-slate-100",
+      )}
+    >
+      {/* Large screen: sidebar section - always rendered to prevent layout jumps */}
+      {isLargeScreen && (
+        <Sidebar
+          chatHistoryOpen={chatHistoryOpen}
+          setChatHistoryOpen={setChatHistoryOpen}
+          onNewChat={() => setThreadId(null)}
+          onSearch={() => setSearchOpen(true)}
+          onComingSoon={handleComingSoon}
+          userInitials={user?.name?.slice(0, 2).toUpperCase() ?? "U"}
+          onProfileClick={() => setFooterMenuOpen((prev) => !prev)}
+        />
+      )}
 
       <div
         className={cn(
-          "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
+          "grid min-w-0 flex-1 grid-cols-[1fr_0fr] transition-all duration-500",
           artifactOpen && "grid-cols-[3fr_2fr]",
         )}
       >
-        <motion.div
+        <div
           className={cn(
             "relative flex min-w-0 flex-1 flex-col overflow-hidden",
             !chatStarted && "grid-rows-[1fr]",
           )}
-          layout={isLargeScreen}
-          animate={{
-            marginLeft: chatHistoryOpen ? (isLargeScreen ? 300 : 0) : 0,
-            width: chatHistoryOpen
-              ? isLargeScreen
-                ? "calc(100% - 300px)"
-                : "100%"
-              : "100%",
-          }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
         >
-          {!chatStarted && (
-            <div className="absolute top-0 left-0 z-10 flex w-full items-center justify-between gap-3 p-2 pl-4">
-              <div>
-                {(!chatHistoryOpen || !isLargeScreen) && (
-                  <Button
-                    className="hover:bg-gray-100"
-                    variant="ghost"
-                    onClick={() => setChatHistoryOpen((p) => !p)}
-                  >
-                    {chatHistoryOpen ? (
-                      <PanelRightOpen className="size-5" />
-                    ) : (
-                      <PanelRightClose className="size-5" />
-                    )}
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-          {chatStarted && (
-            <div className="relative z-10 flex items-center justify-between gap-3 p-2">
-              <div className="relative flex items-center justify-start gap-2">
-                <div className="absolute left-0 z-10">
-                  {(!chatHistoryOpen || !isLargeScreen) && (
-                    <Button
-                      className="hover:bg-gray-100"
-                      variant="ghost"
-                      onClick={() => setChatHistoryOpen((p) => !p)}
-                    >
-                      {chatHistoryOpen ? (
-                        <PanelRightOpen className="size-5" />
-                      ) : (
-                        <PanelRightClose className="size-5" />
-                      )}
-                    </Button>
-                  )}
-                </div>
-                <motion.button
-                  className="flex cursor-pointer items-center gap-2"
-                  onClick={() => setThreadId(null)}
-                  animate={{
-                    marginLeft: !chatHistoryOpen ? 48 : 0,
-                  }}
-                  transition={{
-                    type: "spring",
-                    stiffness: 300,
-                    damping: 30,
-                  }}
-                >
-                  <LangGraphLogoSVG
-                    width={32}
-                    height={32}
-                  />
-                  <span className="text-xl font-semibold tracking-tight">
-                    CyPlanAI
-                  </span>
-                </motion.button>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <TooltipIconButton
-                  size="lg"
-                  className="p-4"
-                  tooltip="New thread"
-                  variant="ghost"
-                  onClick={() => setThreadId(null)}
-                >
-                  <SquarePen className="size-5" />
-                </TooltipIconButton>
-              </div>
-
-              <div className="from-background to-background/0 absolute inset-x-0 top-full h-5 bg-gradient-to-b" />
-            </div>
-          )}
+          <Header
+            chatStarted={chatStarted}
+            isLargeScreen={isLargeScreen}
+            chatHistoryOpen={chatHistoryOpen}
+            setChatHistoryOpen={setChatHistoryOpen}
+            onNewChat={() => setThreadId(null)}
+            threadId={threadId}
+            onRenameThread={handleRenameThread}
+            user={user}
+            onLogout={logout}
+          />
 
           <StickToBottom className="relative flex-1 overflow-hidden">
             <StickyToBottomContent
               className={cn(
-                "absolute inset-0 overflow-y-scroll px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent",
-                !chatStarted && "mt-[25vh] flex flex-col items-stretch",
-                chatStarted && "grid grid-rows-[1fr_auto]",
+                "absolute inset-0 px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent",
+                chatStarted
+                  ? "overflow-y-scroll [&::-webkit-scrollbar-thumb]:bg-gray-300 grid grid-rows-[1fr_auto]"
+                  : "overflow-hidden flex flex-col",
               )}
-              contentClassName="pt-8 pb-16  max-w-3xl mx-auto flex flex-col gap-4 w-full"
+              contentClassName={cn(
+                "mx-auto flex w-full max-w-3xl flex-col gap-4",
+                chatStarted ? "pb-16 pt-8" : "h-full max-w-4xl items-center justify-center gap-6 text-center overflow-hidden py-4",
+              )}
               content={
                 <>
-                  {finalMessages.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-full">
-                      <p className="text-gray-500">No messages yet. Start a new thread!</p>
-                      <p className="text-gray-500">
-                        Click the "New Thread" button or type a message.
-                      </p>
-                    </div>
+                  {finalMessages.length === 0 && !threadId ? (
+                    <WelcomeScreen
+                      user={user}
+                      input={input}
+                      setInput={setInput}
+                      contentBlocks={contentBlocks}
+                      handleFileUpload={handleFileUpload}
+                      removeBlock={removeBlock}
+                      handleSubmit={handleSubmit}
+                      isLoading={isLoading}
+                      quickPrompts={quickPrompts}
+                      onQuickPrompt={handleQuickPrompt}
+                    />
                   ) : (
                     <>
                       {(() => {
@@ -537,103 +751,35 @@ export function Thread() {
                 </>
               }
               footer={
-                <div className="sticky bottom-0 flex flex-col items-center gap-8 bg-white">
-                  {!chatStarted && (
-                    <div className="flex items-center gap-3">
-                      <LangGraphLogoSVG className="h-8 flex-shrink-0" />
-                      <h1 className="text-2xl font-semibold tracking-tight">
-                        CyPlanAI
-                      </h1>
-                    </div>
+                <div
+                  className={cn(
+                    "sticky bottom-0 flex flex-col items-center gap-8 bg-background",
+                    !chatStarted &&
+                      "border-t border-border bg-background/90 text-foreground backdrop-blur-lg",
                   )}
-
+                >
                   <ScrollToBottom className="animate-in fade-in-0 zoom-in-95 absolute bottom-full left-1/2 mb-4 -translate-x-1/2" />
 
-                  <div
-                    ref={dropRef}
-                    className={cn(
-                      "bg-muted relative z-10 mx-auto mb-8 w-full max-w-3xl rounded-2xl shadow-xs transition-all",
-                      dragOver
-                        ? "border-primary border-2 border-dotted"
-                        : "border border-solid",
-                    )}
-                  >
-                    <form
-                      onSubmit={handleSubmit}
-                      className="mx-auto grid max-w-3xl grid-rows-[1fr_auto] gap-2"
-                    >
-                      <ContentBlocksPreview
-                        blocks={contentBlocks}
-                        onRemove={removeBlock}
-                      />
-                      <textarea
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onPaste={handlePaste}
-                        onKeyDown={(e) => {
-                          if (
-                            e.key === "Enter" &&
-                            !e.shiftKey &&
-                            !e.metaKey &&
-                            !e.nativeEvent.isComposing
-                          ) {
-                            e.preventDefault();
-                            const el = e.target as HTMLElement | undefined;
-                            const form = el?.closest("form");
-                            form?.requestSubmit();
-                          }
-                        }}
-                        placeholder="Type your message..."
-                        className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
-                      />
-
-                      <div className="flex items-center gap-6 p-2 pt-4">
-                        <Label
-                          htmlFor="file-input"
-                          className="flex cursor-pointer items-center gap-2"
-                        >
-                          <Plus className="size-5 text-gray-600" />
-                          <span className="text-sm text-gray-600">
-                            Upload PDF or Image
-                          </span>
-                        </Label>
-                        <input
-                          id="file-input"
-                          type="file"
-                          onChange={handleFileUpload}
-                          multiple
-                          accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
-                          className="hidden"
-                        />
-                        {stream.isLoading ? (
-                          <Button
-                            key="stop"
-                            onClick={() => stream.stop()}
-                            className="ml-auto"
-                          >
-                            <LoaderCircle className="h-4 w-4 animate-spin" />
-                            Cancel
-                          </Button>
-                        ) : (
-                          <Button
-                            type="submit"
-                            className="ml-auto shadow-md transition-all"
-                            disabled={
-                              isLoading ||
-                              (!input.trim() && contentBlocks.length === 0)
-                            }
-                          >
-                            Send
-                          </Button>
-                        )}
-                      </div>
-                    </form>
-                  </div>
+                  {chatStarted && (
+                    <MessageInput
+                      input={input}
+                      setInput={setInput}
+                      contentBlocks={contentBlocks}
+                      handleFileUpload={handleFileUpload}
+                      removeBlock={removeBlock}
+                      handlePaste={handlePaste}
+                      handleSubmit={handleSubmit}
+                      isLoading={isLoading}
+                      dragOver={dragOver}
+                      dropRef={dropRef}
+                      onStop={() => stream.stop()}
+                    />
+                  )}
                 </div>
               }
             />
           </StickToBottom>
-        </motion.div>
+        </div>
         <div className="relative flex flex-col border-l">
           <div className="absolute inset-0 flex min-w-[30vw] flex-col">
             <div className="grid grid-cols-[1fr_auto] border-b p-4">
@@ -649,6 +795,36 @@ export function Thread() {
           </div>
         </div>
       </div>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        theme={theme}
+        themeSelection={themeSelection}
+        setThemeSelection={setThemeSelection}
+        setTheme={setTheme}
+        hideToolCalls={hideToolCalls}
+        setHideToolCalls={setHideToolCalls}
+        apiInput={apiInput}
+        setApiInput={setApiInput}
+        assistantInput={assistantInput}
+        setAssistantInput={setAssistantInput}
+        onSave={handleSaveSettings}
+      />
+
+      <UserMenu
+        open={footerMenuOpen && !chatHistoryOpen}
+        menuRef={footerMenuRef}
+        user={user}
+        onSettings={() => {
+          setSettingsOpen(true);
+          setFooterMenuOpen(false);
+        }}
+        onLogout={() => {
+          logout();
+          setFooterMenuOpen(false);
+        }}
+      />
     </div>
   );
 }

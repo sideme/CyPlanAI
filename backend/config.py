@@ -3,6 +3,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Default frontend origins for local development
+DEFAULT_CORS_ORIGINS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+
+
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     DATABASE_URL = os.environ.get('DATABASE_URL') or 'sqlite:///cyplanai.db'
@@ -26,7 +33,7 @@ class Config:
     QWEN_MODEL = os.environ.get('QWEN_MODEL', 'qwen-long')
     
     LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai')  # openai|anthropic|ollama|deepseek|qwen
-    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(',')
+    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', ",".join(DEFAULT_CORS_ORIGINS)).split(',')
     # Vector database configuration
     VECTOR_DB_PATH = os.environ.get('VECTOR_DB_PATH', './vector_db')
     CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '1000'))

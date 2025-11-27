@@ -12,6 +12,8 @@ from routes.feedback import feedback_bp
 from routes.reasoning import reasoning_bp
 from routes.agent import agent_bp
 from routes.documents import documents_bp
+from routes.preferences import preferences_bp
+from services.schema_migrations import run_schema_migrations
 from services.seed_data import seed_frameworks_and_prompts
 
 def create_app(config_class=Config):
@@ -39,10 +41,12 @@ def create_app(config_class=Config):
     app.register_blueprint(reasoning_bp, url_prefix='/api/reasoning')
     app.register_blueprint(agent_bp, url_prefix='/api/agent')
     app.register_blueprint(documents_bp, url_prefix='/api/documents')
+    app.register_blueprint(preferences_bp, url_prefix='/api/preferences')
     
     # Create database tables
     with app.app_context():
         db.create_all()
+        run_schema_migrations()
         # Seed initial frameworks and prompts
         seed_frameworks_and_prompts()
     

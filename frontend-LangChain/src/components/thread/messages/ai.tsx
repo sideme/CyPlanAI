@@ -102,15 +102,28 @@ export function AssistantMessage({
     ? parseAnthropicStreamedToolCalls(content)
     : undefined;
 
-  const toolCalls =
-    message && typeof (message as any)?.tool_calls !== "undefined"
-      ? ((message as any).tool_calls as Array<Record<string, any>> | undefined)
-      : undefined;
+  // Check for tool_calls in both snake_case and camelCase formats
+  const toolCallsRaw = message ? ((message as any)?.tool_calls ?? (message as any)?.toolCalls) : undefined;
+  const toolCalls = Array.isArray(toolCallsRaw) ? toolCallsRaw : undefined;
   const hasToolCalls = Array.isArray(toolCalls) && toolCalls.length > 0;
   const toolCallsHaveContents =
     hasToolCalls &&
     toolCalls?.some((tc) => tc?.args && Object.keys(tc.args).length > 0);
   const hasAnthropicToolCalls = !!anthropicStreamedToolCalls?.length;
+  
+  // Debug: log tool_calls for troubleshooting
+  if (message?.type === "ai") {
+    console.debug("AssistantMessage tool_calls:", {
+      messageId: message?.id,
+      hasToolCalls,
+      toolCallsCount: toolCalls?.length ?? 0,
+      toolCalls,
+      toolCallsRaw,
+      hasAnthropicToolCalls,
+      contentStringLength: contentString.length,
+      messageKeys: message ? Object.keys(message) : [],
+    });
+  }
   const isToolResult = message?.type === "tool";
 
   if (isToolResult && hideToolCalls) {
@@ -139,13 +152,11 @@ export function AssistantMessage({
 
             {!hideToolCalls && (
               <>
-                {(hasToolCalls && toolCallsHaveContents && (
+                {hasAnthropicToolCalls ? (
+                  <ToolCalls toolCalls={anthropicStreamedToolCalls} />
+                ) : hasToolCalls ? (
                   <ToolCalls toolCalls={toolCalls ?? []} />
-                )) ||
-                  (hasAnthropicToolCalls && (
-                    <ToolCalls toolCalls={anthropicStreamedToolCalls} />
-                  )) ||
-                  (hasToolCalls && <ToolCalls toolCalls={toolCalls ?? []} />)}
+                ) : null}
               </>
             )}
 

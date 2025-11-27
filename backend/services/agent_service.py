@@ -3,14 +3,11 @@ from models import db, AgentSession, AgentMessage, Plan, Framework
 from services.plan_generator import generate_plan_summary
 from services.knowledge_base import KnowledgeBase
 from models import Threat
-from config import Config
+from services.llm_factory import get_chat_model
 
 # LangChain chat models
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_community.chat_models import ChatOllama
 
 
 class AgentService:
@@ -33,21 +30,7 @@ class AgentService:
         return msg
 
     def _get_llm(self):
-        provider = (Config.LLM_PROVIDER or 'openai').lower()
-        if provider == 'openai' and Config.OPENAI_API_KEY:
-            return ChatOpenAI(api_key=Config.OPENAI_API_KEY, model=Config.OPENAI_MODEL, temperature=0.4)
-        if provider == 'anthropic' and Config.ANTHROPIC_API_KEY:
-            return ChatAnthropic(api_key=Config.ANTHROPIC_API_KEY, model=Config.ANTHROPIC_MODEL, temperature=0.4)
-        if provider == 'ollama':
-            return ChatOllama(base_url=Config.OLLAMA_BASE_URL, model=Config.OLLAMA_MODEL, temperature=0.4)
-        if provider == 'qwen' and Config.DASHSCOPE_API_KEY:
-            return ChatOpenAI(
-                api_key=Config.DASHSCOPE_API_KEY,
-                base_url=Config.DASHSCOPE_BASE_URL,
-                model=Config.QWEN_MODEL,
-                temperature=0.4,
-            )
-        return None
+        return get_chat_model()
 
     def _chat_response(self, session_id: str, user_text: str) -> str:
         """Free-form chat via LangChain with short system prompt and memory context."""

@@ -1,8 +1,14 @@
 import React from "react";
-import { File, Image as ImageIcon, X as XIcon } from "lucide-react";
+import { File, X as XIcon } from "lucide-react";
 import type { Base64ContentBlock } from "@langchain/core/messages";
 import { cn } from "@/lib/utils";
 import Image from "next/image";
+
+const DOCUMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
 export interface MultimodalPreviewProps {
   block: Base64ContentBlock;
   removable?: boolean;
@@ -56,10 +62,11 @@ export const MultimodalPreview: React.FC<MultimodalPreviewProps> = ({
   if (
     block.type === "file" &&
     block.source_type === "base64" &&
-    block.mime_type === "application/pdf"
+    typeof block.mime_type === "string" &&
+    DOCUMENT_MIME_TYPES.has(block.mime_type)
   ) {
     const filename =
-      block.metadata?.filename || block.metadata?.name || "PDF file";
+      block.metadata?.filename || block.metadata?.name || "Document";
     return (
       <div
         className={cn(

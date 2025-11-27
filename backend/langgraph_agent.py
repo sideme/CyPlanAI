@@ -131,7 +131,9 @@ def normalize_message(message: BaseMessage) -> BaseMessage:
     if isinstance(message, HumanMessage):
         return HumanMessage(content=text, additional_kwargs=message.additional_kwargs)
     if isinstance(message, AIMessage):
-        return AIMessage(content=text, additional_kwargs=message.additional_kwargs)
+        # Preserve tool_calls when normalizing AIMessage
+        tool_calls = getattr(message, "tool_calls", None) if hasattr(message, "tool_calls") else None
+        return AIMessage(content=text, additional_kwargs=message.additional_kwargs, tool_calls=tool_calls)
     if isinstance(message, SystemMessage):
         return SystemMessage(content=text)
     if isinstance(message, ToolMessage):
@@ -255,9 +257,10 @@ Key capabilities:
 
 Always:
 - Cite specific framework controls (e.g., "ISO 27001 A.8.1.1" or "NIST CSF PR.AC-3") when mentioning them
-- Use the knowledge base tools to get accurate information
+- Use the knowledge base tools to get accurate information when needed
 - Be concise, factual, and helpful
 - If you don't know something, say so rather than guessing
+- IMPORTANT: If you already have relevant context provided in the system message, use it directly instead of calling search_knowledge_base again. Only call tools when you need NEW information that is not already available.
 
 Start by greeting the user and asking about their cybersecurity planning goals."""
 
@@ -318,6 +321,19 @@ def should_continue(state: AgentState) -> Literal["tools", "end"]:
     
     # If the last message has tool calls, route to tools
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        # Check for potential infinite loops: if we've called the same tool multiple times
+        # Count recent tool calls of the same type
+        tool_call_names = []
+        for msg in messages[-10:]:  # Check last 10 messages
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_call_names.append(tc.get("name", ""))
+        
+        # If we've called search_knowledge_base more than 3 times in recent messages, force end
+        if tool_call_names.count("search_knowledge_base") > 3:
+            logger.warning("⚠️ Detected potential infinite loop with search_knowledge_base, forcing end")
+            return "end"
+        
         return "tools"
     # Otherwise, end
     return "end"
@@ -354,6 +370,7 @@ def create_agent_graph(user_id: str = None, plan_id: str = None):
         system_text = SYSTEM_PROMPT
         if kb_context:
             system_text += f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{kb_context[:1500]}"
+            system_text += "\n\nIMPORTANT: You already have relevant knowledge base context above. Only call search_knowledge_base if you need additional information that is NOT already provided in the context above."
         
         enhanced_system = SystemMessage(content=system_text)
         

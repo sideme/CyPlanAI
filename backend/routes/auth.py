@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
-from models import db, User
+from models import db, User, UserPreferences
 from datetime import datetime
 
 auth_bp = Blueprint('auth', __name__)
@@ -32,11 +32,15 @@ def register():
     db.session.add(user)
     db.session.commit()
     
+    # Create default preferences for new user
+    prefs = UserPreferences.get_or_create(user.userId)
+    
     access_token = create_access_token(identity=user.userId)
     
     return jsonify({
         'message': 'User registered successfully',
         'user': user.to_dict(),
+        'preferences': prefs.to_dict(),
         'access_token': access_token
     }), 201
 
@@ -53,23 +57,33 @@ def login():
     if not user or not user.check_password(data['password']):
         return jsonify({'error': 'Invalid credentials'}), 401
     
+    # Get or create user preferences
+    prefs = UserPreferences.get_or_create(user.userId)
+    
     access_token = create_access_token(identity=user.userId)
     
     return jsonify({
         'message': 'Login successful',
         'user': user.to_dict(),
+        'preferences': prefs.to_dict(),
         'access_token': access_token
     }), 200
 
 @auth_bp.route('/me', methods=['GET'])
 @jwt_required()
 def get_current_user():
-    """Get current authenticated user"""
+    """Get current authenticated user with preferences"""
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
     
     if not user:
         return jsonify({'error': 'User not found'}), 404
     
-    return jsonify(user.to_dict()), 200
+    # Get user preferences
+    prefs = UserPreferences.get_or_create(user_id)
+    
+    return jsonify({
+        **user.to_dict(),
+        'preferences': prefs.to_dict()
+    }), 200
 

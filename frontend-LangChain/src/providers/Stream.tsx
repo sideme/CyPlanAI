@@ -17,7 +17,7 @@ import {
 } from "@langchain/langgraph-sdk/react-ui";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { LangGraphLogoSVG } from "@/components/icons/langgraph";
+import { CyPlanAILogoSVG } from "@/components/icons/cyplanai";
 import { Label } from "@/components/ui/label";
 import { ArrowRight } from "lucide-react";
 import { PasswordInput } from "@/components/ui/password-input";
@@ -25,6 +25,7 @@ import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
 import { useAppState } from "./AppState";
+import { useAuth } from "./Auth";
 
 export type StateType = { messages: StreamMessage[]; ui?: UIMessage[] };
 
@@ -84,6 +85,19 @@ const getMessageSignature = (message: StreamMessage): string => {
       ? message.content
       : JSON.stringify(message?.content ?? "");
   return `${type}:${content}`;
+};
+
+// Extract just the text content for fuzzy matching (ignoring attachments/files differences)
+const getTextContent = (message: StreamMessage): string => {
+  if (!message?.content) return "";
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("");
+  }
+  return "";
 };
 
 const getCanonicalId = (message?: StreamMessage): string | undefined => {
@@ -249,16 +263,35 @@ const StreamSession = ({
   // Custom state to store messages directly from SSE
   const [directSSEMessages, setDirectSSEMessages] = useState<StreamMessage[]>([]);
   const directSSEMessagesRef = useRef<StreamMessage[]>([]);
+  const prevThreadIdRef = useRef<string | null>(threadId);
+  
   useEffect(() => {
     directSSEMessagesRef.current = directSSEMessages;
   }, [directSSEMessages]);
+  
+  // Clear messages when threadId changes to prevent message accumulation
+  // BUT: Don't clear if we're creating a new thread (null -> new_id)
+  // This prevents the flash of empty screen when sending first message
+  useEffect(() => {
+    if (prevThreadIdRef.current !== threadId) {
+      const isCreatingNewThread = prevThreadIdRef.current === null && threadId !== null;
+      
+      // Only clear if we're switching to a different existing thread, not creating a new one
+      // When creating a new thread, we want to keep the optimistic message
+      if (!isCreatingNewThread) {
+        setDirectSSEMessages([]);
+        directSSEMessagesRef.current = [];
+      }
+      prevThreadIdRef.current = threadId;
+    }
+  }, [threadId]);
   
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
     assistantId,
     threadId: threadId ?? null,
-    fetchStateHistory: false,
+    fetchStateHistory: true,
     onCustomEvent: (
       event: UIMessage | RemoveUIMessage,
       options: { mutate: (updater: (prev: StateType) => StateType) => void },
@@ -281,9 +314,22 @@ const StreamSession = ({
           maybeMessages.forEach((msg: StreamMessage) => {
             if (!msg || typeof msg !== "object") return;
             const signature = getMessageSignature(msg as StreamMessage);
-            const optimisticIndex = nextMessages.findIndex(
-              (m) => Boolean(m?.clientOptimistic) && getMessageSignature(m) === signature,
-            );
+            const canonicalId =
+              getCanonicalId(msg) ?? msg.id ?? crypto.randomUUID();
+
+            // First, try to match by optimistic message signature OR text content (ignoring attachments)
+            const optimisticIndex = nextMessages.findIndex((m) => {
+              if (!Boolean(m?.clientOptimistic)) return false;
+              // Exact match
+              if (getMessageSignature(m) === signature) return true;
+              // Fuzzy text match for human messages (optimistic has file, backend response might not)
+              if (m.type === "human" && msg.type === "human") {
+                const textA = getTextContent(m).trim();
+                const textB = getTextContent(msg).trim();
+                return textA.length > 0 && textA === textB;
+              }
+              return false;
+            });
 
             if (optimisticIndex !== -1) {
               const existingMessage = nextMessages[optimisticIndex];
@@ -291,32 +337,68 @@ const StreamSession = ({
               nextMessages[optimisticIndex] = {
                 ...existingMessage,
                 ...msg,
+                // If merging backend message into optimistic, we might lose attachments if we are not careful
+                // But mergeOptimisticContent handles this
                 content: mergeOptimisticContent(existingMessage, msg),
+                // Preserve tool_calls from incoming message
+                tool_calls: (msg as any)?.tool_calls ?? (existingMessage as any)?.tool_calls,
                 id: resolvedId,
                 clientOptimistic: false,
               };
               return;
             }
 
-            const canonicalId =
-              getCanonicalId(msg) ?? msg.id ?? crypto.randomUUID();
-
-            const existingIndex = nextMessages.findIndex(
+            // Then, try to match by canonical ID
+            const existingIndexById = nextMessages.findIndex(
               (m) =>
                 getCanonicalId(m) === canonicalId ||
                 (m.id ?? "") === (msg.id ?? ""),
             );
-            if (existingIndex >= 0) {
-              nextMessages[existingIndex] = {
-                ...nextMessages[existingIndex],
+            if (existingIndexById >= 0) {
+              nextMessages[existingIndexById] = {
+                ...nextMessages[existingIndexById],
                 ...msg,
-                content: mergeOptimisticContent(nextMessages[existingIndex], msg),
-                id: msg.id ?? nextMessages[existingIndex].id ?? canonicalId,
+                content: mergeOptimisticContent(nextMessages[existingIndexById], msg),
+                // Preserve tool_calls from incoming message
+                tool_calls: (msg as any)?.tool_calls ?? (nextMessages[existingIndexById] as any)?.tool_calls,
+                id: msg.id ?? nextMessages[existingIndexById].id ?? canonicalId,
                 clientOptimistic: false,
               };
               return;
             }
 
+            // Finally, check for duplicate by content signature OR text content (for messages without ID or with different IDs)
+            const existingIndexBySignature = nextMessages.findIndex((m) => {
+              if (Boolean(m?.clientOptimistic)) return false; // Already checked optimistic above
+              
+              // Exact signature match
+              if (getMessageSignature(m) === signature) return true;
+              
+              // Fuzzy text match for human messages
+              if (m.type === "human" && msg.type === "human") {
+                const textA = getTextContent(m).trim();
+                const textB = getTextContent(msg).trim();
+                // Only match if text is substantial to avoid false positives on empty/short messages
+                return textA.length > 5 && textA === textB;
+              }
+              return false;
+            });
+            
+            if (existingIndexBySignature >= 0) {
+              // Update existing message with same content but keep the original ID
+              nextMessages[existingIndexBySignature] = {
+                ...nextMessages[existingIndexBySignature],
+                ...msg,
+                content: mergeOptimisticContent(nextMessages[existingIndexBySignature], msg),
+                // Preserve tool_calls from incoming message
+                tool_calls: (msg as any)?.tool_calls ?? (nextMessages[existingIndexBySignature] as any)?.tool_calls,
+                id: nextMessages[existingIndexBySignature].id ?? msg.id ?? canonicalId,
+                clientOptimistic: false,
+              };
+              return;
+            }
+
+            // New message, add it
             nextMessages.push({
               ...msg,
               id: msg.id ?? canonicalId,
@@ -365,28 +447,46 @@ const StreamSession = ({
         }
       });
 
-      // Process incoming messages: replace optimistic, dedupe by ID
+      // Process incoming messages: replace optimistic, dedupe by ID and signature
       // IMPORTANT: Maintain the order of incoming messages
       const processedMessages: StreamMessage[] = [];
       const matchedOptimisticIndexes = new Set<number>();
       const seenCanonicalIds = new Set<string>();
+      const seenSignatures = new Set<string>();
       
       incomingMessages.forEach((msg: StreamMessage) => {
         const canonicalId = getCanonicalId(msg);
         const effectiveId = canonicalId ?? msg?.id ?? crypto.randomUUID();
+        const signature = getMessageSignature(msg);
         
         // Skip if we've already processed this ID in this batch
         if (seenCanonicalIds.has(effectiveId)) {
           return;
         }
         
+        // Skip if we've already processed this exact content in this batch
+        if (signature && seenSignatures.has(signature)) {
+          return;
+        }
+        
         seenCanonicalIds.add(effectiveId);
+        if (signature) {
+          seenSignatures.add(signature);
+        }
         
         // Check if this matches an optimistic message
-        const signature = getMessageSignature(msg);
         const optimisticIndex = existingOptimistic.findIndex((existing, idx) => {
           if (matchedOptimisticIndexes.has(idx)) return false;
-          return getMessageSignature(existing) === signature;
+          // Exact signature match
+          if (getMessageSignature(existing) === signature) return true;
+          
+          // Fuzzy text match for human messages (optimistic has file, backend response might not)
+          if (existing.type === "human" && msg.type === "human") {
+            const textA = getTextContent(existing).trim();
+            const textB = getTextContent(msg).trim();
+            return textA.length > 0 && textA === textB;
+          }
+          return false;
         });
 
         if (optimisticIndex !== -1) {
@@ -401,6 +501,8 @@ const StreamSession = ({
             ...optimisticMessage,
             ...msg,
             content: mergeOptimisticContent(optimisticMessage, msg),
+            // Preserve tool_calls from incoming message (backend has the correct tool_calls)
+            tool_calls: (msg as any)?.tool_calls ?? (optimisticMessage as any)?.tool_calls,
             id: msg.id ?? optimisticMessage.id ?? finalCanonicalId,
             clientOptimistic: false,
           });
@@ -411,18 +513,48 @@ const StreamSession = ({
             ...existing,
             ...msg,
             content: mergeOptimisticContent(existing, msg),
+            // Preserve tool_calls from incoming message (backend has the correct tool_calls)
+            tool_calls: (msg as any)?.tool_calls ?? (existing as any)?.tool_calls,
             id: msg.id ?? existing.id ?? canonicalId,
             clientOptimistic: false,
           });
           existingByCanonical.delete(canonicalId);
         } else {
-          // New message
-          const fallbackCanonical = canonicalId ?? effectiveId;
-          processedMessages.push({
-            ...msg,
-            id: msg.id ?? fallbackCanonical,
-            clientOptimistic: false,
+          // Check if we already have a message with the same content signature OR text content
+          const existingBySignature = existingMessages.find((m) => {
+            if (Boolean(m?.clientOptimistic)) return false; // Already processed optimistic
+            // Exact signature match
+            if (getMessageSignature(m) === signature) return true;
+            
+            // Fuzzy text match for human messages
+            if (m.type === "human" && msg.type === "human") {
+              const textA = getTextContent(m).trim();
+              const textB = getTextContent(msg).trim();
+              return textA.length > 5 && textA === textB;
+            }
+            return false;
           });
+          
+          if (existingBySignature) {
+            // Update existing message with same content
+            processedMessages.push({
+              ...existingBySignature,
+              ...msg,
+              content: mergeOptimisticContent(existingBySignature, msg),
+              // Preserve tool_calls from incoming message
+              tool_calls: (msg as any)?.tool_calls ?? (existingBySignature as any)?.tool_calls,
+              id: existingBySignature.id ?? msg.id ?? effectiveId,
+              clientOptimistic: false,
+            });
+          } else {
+            // New message
+            const fallbackCanonical = canonicalId ?? effectiveId;
+            processedMessages.push({
+              ...msg,
+              id: msg.id ?? fallbackCanonical,
+              clientOptimistic: false,
+            });
+          }
         }
       });
 
@@ -544,6 +676,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     assistantId,
     setAssistantId,
   } = useAppState();
+  const { token } = useAuth();
 
   // For API key, use localStorage with env var fallback
   const [apiKey, _setApiKey] = useState(() => {
@@ -555,6 +688,14 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     window.localStorage.setItem("lg:chat:apiKey", key);
     _setApiKey(key);
   };
+
+  useEffect(() => {
+    if (token) {
+      _setApiKey(token);
+    } else {
+      _setApiKey("");
+    }
+  }, [token]);
 
   // Determine final values to use, prioritizing URL params then env vars then defaults
   const finalApiUrl = apiUrl || DEFAULT_API_URL;
@@ -568,13 +709,13 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
         <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-3xl flex-col rounded-lg border shadow-lg">
           <div className="mt-14 flex flex-col gap-2 border-b p-6">
             <div className="flex flex-col items-start gap-2">
-              <LangGraphLogoSVG className="h-7" />
+              <CyPlanAILogoSVG className="h-7" />
               <h1 className="text-xl font-semibold tracking-tight">
-                Agent Chat
+                CyPlanAI
               </h1>
             </div>
             <p className="text-muted-foreground">
-              Welcome to Agent Chat! Before you get started, you need to enter
+              Welcome to CyPlanAI! Before you get started, you need to enter
               the URL of the deployment and the assistant / graph ID.
             </p>
           </div>

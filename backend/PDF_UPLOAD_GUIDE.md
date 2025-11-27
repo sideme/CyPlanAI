@@ -164,11 +164,11 @@ completion = client.chat.completions.create(
 
 ### Frontend Upload
 
-Users click the "Upload PDF or Image" button in the frontend interface to select a file. The frontend encodes the file as base64 and sends it to the backend.
+Users click the "Upload files" button in the frontend interface to select a PDF or Word document. The frontend encodes the file as base64 and sends it to the backend.
 
 ### Backend Processing
 
-1. Receive base64-encoded PDF data
+1. Receive base64-encoded document data
 2. Decode to binary data
 3. Call `QwenFileService.upload_file()` to upload to DashScope
 4. Wait for file processing to complete (status = "processed")
@@ -199,19 +199,19 @@ Users click the "Upload PDF or Image" button in the frontend interface to select
 
 3. **Test Upload**:
    - Open browser and visit http://localhost:3000
-   - Click "Upload PDF or Image" button
-   - Select a PDF file
+   - Click "Upload files" button
+- Select a PDF or Word document
    - Enter a question, e.g., "What does this file talk about?"
    - Observe backend logs, should see:
      ```
-     📤 Uploading xxx.pdf to DashScope...
-     ⏳ Waiting for DashScope to process xxx.pdf...
-     ✅ File xxx.pdf successfully processed in X.Xs (ID: file-fe-xxx)
-     📄 File reference added. Model will read content automatically.
+    📤 Uploading sample.docx to DashScope...
+    ⏳ Waiting for DashScope to process sample.docx...
+    ✅ File sample.docx successfully processed in X.Xs (ID: file-fe-xxx)
+    📄 File reference added. Model will read content automatically.
      ```
 
 4. **Verify Response**:
-   - Qwen-Long should be able to read PDF content and answer questions
+- Qwen-Long should be able to read document content and answer questions
    - If it fails, check:
      - Is `DASHSCOPE_API_KEY` correct?
      - Is `LLM_PROVIDER` set to `qwen`?
