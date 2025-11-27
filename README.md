@@ -21,6 +21,10 @@ CyPlanAI/
 │   ├── langgraph_agent.py    # LangGraph agent definition
 │   ├── langgraph_server.py   # FastAPI server for LangGraph
 │   ├── app.py                # Flask application
+│   ├── services/             # Backend services
+│   │   ├── knowledge_base.py # RAG knowledge base service
+│   │   ├── qwen_service.py   # Qwen file upload service
+│   │   └── ...
 │   └── ...
 ├── frontend-LangChain/  # Next.js frontend application (agent-chat-ui)
 │   ├── src/                  # Source code
@@ -28,6 +32,10 @@ CyPlanAI/
 │   │   ├── components/       # React components
 │   │   └── ...
 │   └── ...
+├── library/          # Reference documents for knowledge base
+│   ├── NIST.AI.100-1.pdf
+│   ├── NIST.CSWP.29.pdf
+│   └── ...           # PDF documents for training
 └── docs/             # Project documentation
 ```
 
@@ -37,7 +45,12 @@ CyPlanAI/
 
 - Python 3.8 or higher
 - Node.js 16 or higher and npm/pnpm
-- OpenAI API key (or Anthropic/Ollama for alternative LLM providers)
+- API key for at least one LLM provider:
+  - OpenAI API key (for OpenAI models or embeddings)
+  - Anthropic API key (for Claude models)
+  - DeepSeek API key (for DeepSeek models)
+  - DashScope API key (for Qwen models and document upload)
+  - Or use Ollama for local models
 
 ### Backend Setup
 
@@ -68,20 +81,36 @@ pip install -r requirements.txt
 
 5. Create a `.env` file in the backend directory:
 ```bash
-OPENAI_API_KEY=your_openai_api_key_here
 SECRET_KEY=your_secret_key_here_change_in_production
 DATABASE_URL=sqlite:///cyplanai.db
 FLASK_ENV=development
-# LLM Provider options: openai | anthropic | ollama
+
+# LLM Provider options: openai | anthropic | ollama | deepseek | qwen
 LLM_PROVIDER=openai
+
 # OpenAI config
+OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4o-mini
+
 # Anthropic (optional)
 # ANTHROPIC_API_KEY=your_anthropic_key
 # ANTHROPIC_MODEL=claude-3-5-haiku-latest
+
+# DeepSeek (optional)
+# DEEPSEEK_API_KEY=your_deepseek_api_key
+# DEEPSEEK_API_BASE=https://api.deepseek.com
+# DEEPSEEK_MODEL=deepseek-chat
+# Note: DeepSeek doesn't provide embeddings, set OPENAI_API_KEY for embeddings
+
+# Qwen/DashScope (optional, required for document upload feature)
+# DASHSCOPE_API_KEY=your_dashscope_api_key
+# DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# QWEN_MODEL=qwen-long
+
 # Ollama local (optional)
 # OLLAMA_BASE_URL=http://localhost:11434
 # OLLAMA_MODEL=llama3.1
+
 # CORS (dev): allow both localhost and 127.0.0.1
 CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
@@ -147,19 +176,27 @@ The frontend will run on `http://localhost:3000`
 
 4. **Chat with CyPlanAI:**
    - Ask questions about cybersecurity frameworks
+   - Upload PDF documents for AI to analyze (requires Qwen provider)
    - Request risk assessments
    - Generate plan summaries
    - Get information about controls and threats
+
+5. **Train Knowledge Base (Optional):**
+   - Place PDF documents in the `library/` folder
+   - Run training script: `cd backend && python3 train_library_direct.py`
+   - See `backend/TRAIN_LIBRARY_GUIDE.md` for detailed instructions
 
 ## Features
 
 - **Conversational Interface**: Chat-based interaction using agent-chat-ui
 - **LangGraph Agent**: Stateful agent with tool calling capabilities
 - **Knowledge Base**: RAG-powered responses with framework, control, and threat information
+- **Document Upload**: Upload PDF/DOCX files for AI analysis (Qwen-Long model)
 - **Framework Support**: NIST CSF, ISO 27001, NIST AI RMF, MITRE ATLAS
 - **Risk Assessment**: Automated threat analysis and scoring
 - **Plan Generation**: AI-powered plan summary generation
-- **Multi-LLM Support**: OpenAI, Anthropic, or Ollama
+- **Multi-LLM Support**: OpenAI, Anthropic, DeepSeek, Qwen, or Ollama
+- **Knowledge Base Training**: Train custom knowledge base from PDF documents
 
 ## API Endpoints
 
@@ -180,6 +217,8 @@ The frontend will run on `http://localhost:3000`
 - `POST /api/plans/{id}/generate-summary` - Generate plan summary
 - `GET /api/plans/{id}/export` - Export plan (PDF/JSON)
 - `POST /api/feedback` - Submit feedback
+- `POST /api/documents/upload` - Upload document to knowledge base
+- `GET /api/documents/libraries` - Get all document libraries
 
 ## Development
 
@@ -207,6 +246,37 @@ cd frontend-LangChain
 pnpm dev
 ```
 
+### Knowledge Base Training
+
+To train the knowledge base with your own documents:
+
+1. Place PDF documents in the `library/` folder at the project root
+2. Run the training script:
+```bash
+cd backend
+source venv/bin/activate
+python3 train_library_direct.py
+```
+
+For detailed instructions, see `backend/TRAIN_LIBRARY_GUIDE.md`
+
+### Document Upload Feature
+
+The system supports uploading PDF/DOCX files for AI analysis:
+
+1. **Requirements**: Use Qwen as LLM provider with DashScope API
+2. **Configuration**: Set `LLM_PROVIDER=qwen` and `DASHSCOPE_API_KEY` in `.env`
+3. **Usage**: Click "Upload files" button in the chat interface
+4. **Supported formats**: PDF (up to 150MB), DOCX, TXT, and more
+
+For detailed documentation, see `backend/PDF_UPLOAD_GUIDE.md`
+
+## Project Management
+
+### Sprint Planning and Backlog Tracking
+
+Sprint planning and backlog management were conducted using Microsoft Project. Tasks were organized into functional phases including System Design, Development and Testing, QA, and Presentation Prep. Each task includes assigned team members, start and end dates, durations, and dependencies. The Gantt chart illustrates our sprint timeline and progress, with all tasks completed by November 27, 2025. Daily standups ensured updates were reflected in MS Project, supporting a successful demo and final milestone submission.
+
 ## Troubleshooting
 
 ### Backend Issues
@@ -226,6 +296,18 @@ pnpm dev
 - Check that LLM provider is configured correctly
 - Verify all required packages are installed
 - Check server logs for detailed error messages
+
+### Document Upload Issues
+- Ensure `LLM_PROVIDER=qwen` is set for document upload feature
+- Verify `DASHSCOPE_API_KEY` is configured correctly
+- Check file size limits (PDF: 150MB, Images: 20MB)
+- See `backend/PDF_UPLOAD_GUIDE.md` for troubleshooting
+
+### Knowledge Base Issues
+- Ensure documents are placed in `library/` folder
+- Verify OpenAI API key is set (required for embeddings)
+- Check training logs for errors
+- See `backend/TRAIN_LIBRARY_GUIDE.md` for detailed help
 
 ## License
 
