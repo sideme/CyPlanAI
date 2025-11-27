@@ -277,6 +277,10 @@ For detailed documentation, see `backend/PDF_UPLOAD_GUIDE.md`
 
 Sprint planning and backlog management were conducted using Microsoft Project. Tasks were organized into functional phases including System Design, Development and Testing, QA, and Presentation Prep. Each task includes assigned team members, start and end dates, durations, and dependencies. The Gantt chart illustrates our sprint timeline and progress, with all tasks completed by November 27, 2025. Daily standups ensured updates were reflected in MS Project, supporting a successful demo and final milestone submission.
 
+**Project Files:**
+- [Sprint Planning Gantt Chart](./docs/sprint_planning.pdf) - Sprint planning and backlog tracking (viewable in browser)
+- [Project Documentation](./docs/project_documentation.pdf) - Detailed project documentation (viewable in browser)
+
 ## Troubleshooting
 
 ### Backend Issues
